@@ -334,6 +334,21 @@ fn build_init_script(token: &str) -> String {
 (function() {{
   var TOKEN = {token_literal};
   var ORIGIN = window.location.origin;
+
+  // Strip embedded Basic-auth credentials from the document URL.
+  // We navigated to `https://user:pass@host/` so the engine performs
+  // the initial Basic auth, but the WHATWG Fetch spec rejects any
+  // fetch() whose URL contains userinfo. After the first navigation
+  // the engine caches credentials for the origin, so subsequent
+  // requests work without userinfo in the URL.
+  try {{
+    var loc = window.location;
+    if (loc.username || loc.password) {{
+      var clean = loc.pathname + loc.search + loc.hash;
+      window.history.replaceState(null, "", clean);
+    }}
+  }} catch (e) {{}}
+
   var orig = window.fetch.bind(window);
   window.fetch = function(input, init) {{
     init = init || {{}};
@@ -355,7 +370,7 @@ fn build_init_script(token: &str) -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.1",
+    version: "0.1.2",
     hasToken: !!TOKEN,
     capture: function(accountId) {{
       if (!accountId) return;
