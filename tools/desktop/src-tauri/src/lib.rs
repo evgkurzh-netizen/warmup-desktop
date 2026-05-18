@@ -214,6 +214,18 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWind
         let _ = url.set_password(Some(&pass));
     }
 
+    // Embed the owner token into the URL fragment so the init script can
+    // pick it up synchronously without an `invoke()` call (which WebKit
+    // blocks as mixed content on https origins via the `ipc://` scheme).
+    // The fragment never leaves the client (browsers do not send it to
+    // the server) and the init script wipes it from the URL via
+    // history.replaceState before any page code runs.
+    let token = read_token().unwrap_or_default();
+    if !token.is_empty() {
+        let encoded: String = url::form_urlencoded::byte_serialize(token.as_bytes()).collect();
+        url.set_fragment(Some(&format!("__ywk_t={encoded}")));
+    }
+
     let nav_app = app.clone();
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Warmup")
@@ -332,66 +344,78 @@ async fn finish_welcome<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn build_init_script() -> String {
-    // The token is NOT baked into this script. Instead the wrapper
-    // reads it lazily via a Tauri `invoke("get_owner_token_jit")` call
-    // that runs on every page load. This means:
-    //   - Welcome-flow token saves are picked up on the first main-
-    //     window navigation without restart.
-    //   - In-page setToken updates take effect after the script's own
-    //     `window.location.reload()`, again without restart.
-    // Until the async invoke resolves, fetch calls await it via a
-    // shared promise so the very first batch of requests do not race.
+    // Token transport: the Rust side embeds the keychain token into the
+    // initial URL as `#__ywk_t=<value>`. The fragment never reaches the
+    // server. This init script reads it synchronously and immediately
+    // strips it from the URL via history.replaceState before any page
+    // code runs. The value is mirrored into sessionStorage so a manual
+    // reload (Cmd+R) keeps working without a fresh fragment.
+    //
+    // We deliberately avoid `invoke("get_owner_token_jit")` here:
+    // WebKit blocks the `ipc://localhost/...` custom protocol as mixed
+    // content on https origins, and Tauri's postMessage fallback is not
+    // always available before the fetch wrapper needs the token.
+    //
+    // For in-session updates (dashboard's API-token entry → set-token
+    // deep-link), the Rust handler evals `__YWK_TOKEN_UPDATE__(value)`
+    // directly into this window, so no reload is needed at all.
     format!(
         r#"
 (function() {{
   var ORIGIN = window.location.origin;
   var state = {{ token: "" }};
-  var ready;
 
-  // Strip embedded Basic-auth credentials from the document URL.
-  // The engine has cached them for the origin after the initial nav,
-  // but the WHATWG Fetch spec rejects fetch() on URLs with userinfo.
+  // 1) Pull token from the URL hash if Rust embedded it there.
+  try {{
+    var hash = window.location.hash || "";
+    if (hash.charAt(0) === "#") hash = hash.slice(1);
+    var params = new URLSearchParams(hash);
+    var t = params.get("__ywk_t");
+    if (t) {{
+      state.token = t;
+      try {{ sessionStorage.setItem("__ywk_t", t); }} catch (e) {{}}
+    }}
+  }} catch (e) {{}}
+
+  // 2) Fall back to sessionStorage on a plain reload.
+  if (!state.token) {{
+    try {{
+      var s = sessionStorage.getItem("__ywk_t");
+      if (s) state.token = s;
+    }} catch (e) {{}}
+  }}
+
+  // 3) Strip Basic-auth credentials AND the token fragment from the URL
+  //    so the page never sees them in document.URL / location.href.
   try {{
     var loc = window.location;
-    if (loc.username || loc.password) {{
-      var clean = loc.pathname + loc.search + loc.hash;
+    var needsRewrite = loc.username || loc.password ||
+      (loc.hash && loc.hash.indexOf("__ywk_t=") >= 0);
+    if (needsRewrite) {{
+      // Preserve any other fragment params the page might use.
+      var cleanHash = "";
+      try {{
+        var hp = new URLSearchParams((loc.hash || "").replace(/^#/, ""));
+        hp.delete("__ywk_t");
+        var rest = hp.toString();
+        if (rest) cleanHash = "#" + rest;
+      }} catch (e) {{}}
+      var clean = loc.pathname + loc.search + cleanHash;
       window.history.replaceState(null, "", clean);
     }}
   }} catch (e) {{}}
 
-  function loadToken() {{
+  // Exposed to Rust via WebviewWindow::eval — see set-token handler.
+  window.__YWK_TOKEN_UPDATE__ = function(value) {{
+    state.token = value || "";
     try {{
-      var inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
-      if (typeof inv !== "function") return Promise.resolve();
-      // The first call may fail on macOS because WebKit blocks the
-      // `ipc://localhost/...` custom-protocol fetch as mixed content
-      // when the document origin is https. Tauri auto-falls back to
-      // postMessage for subsequent calls, so a short-delayed retry
-      // usually succeeds.
-      function once() {{ return inv("get_owner_token_jit"); }}
-      return once()
-        .catch(function() {{
-          return new Promise(function(resolve) {{
-            setTimeout(function() {{
-              once().then(resolve).catch(function() {{ resolve(""); }});
-            }}, 150);
-          }});
-        }})
-        .then(function(t) {{
-          state.token = (typeof t === "string") ? t : "";
-        }})
-        .catch(function() {{}});
-    }} catch (e) {{
-      return Promise.resolve();
-    }}
-  }}
-  ready = loadToken();
+      if (state.token) sessionStorage.setItem("__ywk_t", state.token);
+      else sessionStorage.removeItem("__ywk_t");
+    }} catch (e) {{}}
+  }};
 
   var orig = window.fetch.bind(window);
-  window.fetch = async function(input, init) {{
-    if (state.token === "") {{
-      try {{ await ready; }} catch (e) {{}}
-    }}
+  window.fetch = function(input, init) {{
     init = init || {{}};
     try {{
       var urlStr = typeof input === "string"
@@ -411,13 +435,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.6",
-    // hasToken intentionally always true in desktop mode: the dashboard
-    // uses this flag to decide whether to show its "API Token" entry
-    // UI, but in desktop the token lives in the OS keychain and is
-    // pulled lazily by the fetch wrapper above. Showing the UI anyway
-    // when the keychain is empty would be more useful, but doing so
-    // requires an async check the dashboard isn't structured for.
+    version: "0.1.7",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -426,6 +444,9 @@ fn build_init_script() -> String {
     }},
     setToken: function(value) {{
       if (!value) return;
+      // Pre-apply locally so the very next fetch already carries it,
+      // even before the deep-link round-trip lands.
+      try {{ window.__YWK_TOKEN_UPDATE__(value); }} catch (e) {{}}
       var iframe = document.createElement("iframe");
       iframe.style.display = "none";
       iframe.src =
@@ -433,8 +454,7 @@ fn build_init_script() -> String {
       document.body.appendChild(iframe);
       setTimeout(function() {{
         try {{ iframe.remove(); }} catch (e) {{}}
-        window.location.reload();
-      }}, 800);
+      }}, 500);
     }},
     onCaptureEvent: function(cb) {{
       listeners.push(cb);
@@ -490,15 +510,19 @@ fn handle_navigation<R: Runtime>(app: &AppHandle<R>, url: &Url) -> bool {
                             log::warn!(
                                 "failed to persist token: {err:?}"
                             );
+                        } else if let Some(win) =
+                            app.get_webview_window("main")
+                        {
+                            // Push the new value into the running page
+                            // so the next fetch picks it up without any
+                            // reload or window rebuild. Init script
+                            // exposes __YWK_TOKEN_UPDATE__ for this.
+                            let js = format!(
+                                "if(window.__YWK_TOKEN_UPDATE__)window.__YWK_TOKEN_UPDATE__({});",
+                                serde_json::Value::String(value.to_string())
+                            );
+                            let _ = win.eval(&js);
                         }
-                        // The JS bridge does `window.location.reload()`
-                        // 800ms after firing this deep-link. After the
-                        // refactor below, the init script re-reads the
-                        // token from the keychain via an `invoke()` call
-                        // on every page load — so the reload picks up
-                        // the value we just wrote. No window rebuild
-                        // necessary, which used to crash the app when
-                        // Tauri exited on the last window closing.
                     }
                 }
             }
