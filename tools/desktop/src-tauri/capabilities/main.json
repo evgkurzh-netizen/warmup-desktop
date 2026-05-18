@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Main dashboard window: shell open + updater only. Does NOT expose invoke/event APIs to the remote origin.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://warm-acc.fvds.ru/*"]
+  },
+  "permissions": [
+    "shell:allow-open",
+    "updater:default"
+  ]
+}

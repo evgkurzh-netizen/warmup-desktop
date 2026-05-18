@@ -1,0 +1,153 @@
+name: Desktop release
+
+# Build macOS .dmg + Windows .msi/.exe installers for the Warmup desktop app
+# whenever a tag like `desktop-v0.1.0` is pushed, and attach them to a GitHub
+# Release. Triggered separately from any backend release to keep desktop
+# versioning independent.
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            sidecarTarget: darwin-arm64
+            rustTarget: aarch64-apple-darwin
+          - os: macos-13
+            sidecarTarget: darwin-x64
+            rustTarget: x86_64-apple-darwin
+          - os: windows-latest
+            sidecarTarget: win-x64
+            rustTarget: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rustTarget }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tools/desktop/src-tauri/Cargo.toml') }}
+
+      # We deliberately scope install to just the desktop tool to avoid
+      # pulling the whole monorepo's heavy deps onto CI runners.
+      - name: Install desktop deps
+        run: pnpm --filter @workspace/desktop install --frozen-lockfile=false
+
+      - name: Install sidecar deps
+        run: |
+          cd tools/desktop/sidecar
+          npm install --no-audit --no-fund
+
+      - name: Build sidecar JS bundle
+        run: |
+          cd tools/desktop/sidecar
+          npm run build:js
+
+      - name: Build sidecar binary (${{ matrix.sidecarTarget }})
+        run: |
+          cd tools/desktop/sidecar
+          node ./build.mjs --target=${{ matrix.sidecarTarget }}
+
+      - name: Generate Tauri icons
+        run: pnpm --filter @workspace/desktop run icons
+        continue-on-error: true
+
+      - name: Inject updater public key
+        shell: bash
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+        run: |
+          if [ -z "$TAURI_UPDATER_PUBKEY" ]; then
+            echo "ERROR: TAURI_UPDATER_PUBKEY secret is not set." >&2
+            echo "Generate a keypair locally with:" >&2
+            echo "  pnpm --filter @workspace/desktop exec tauri signer generate" >&2
+            echo "Add the PUBLIC key as the TAURI_UPDATER_PUBKEY repo secret," >&2
+            echo "and the PRIVATE key as TAURI_SIGNING_PRIVATE_KEY (+ optional" >&2
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD)." >&2
+            exit 1
+          fi
+          node -e "
+            const fs=require('fs');
+            const p='tools/desktop/src-tauri/tauri.conf.json';
+            const c=JSON.parse(fs.readFileSync(p,'utf8'));
+            c.plugins.updater.pubkey=process.env.TAURI_UPDATER_PUBKEY;
+            fs.writeFileSync(p,JSON.stringify(c,null,2));
+          "
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm --filter @workspace/desktop run build -- --target ${{ matrix.rustTarget }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: warmup-${{ matrix.sidecarTarget }}
+          # `.sig` files appear next to each artifact when
+          # TAURI_SIGNING_PRIVATE_KEY is configured. The updater feed expects
+          # them to be sibling assets on the GitHub Release.
+          path: |
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/dmg/*.dmg
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/dmg/*.dmg.sig
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/nsis/*.exe
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/nsis/*.exe.sig
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/macos/*.app.tar.gz
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/macos/*.app.tar.gz.sig
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/msi/*.msi
+            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/msi/*.msi.sig
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Desktop ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            ./artifacts/**/*.dmg
+            ./artifacts/**/*.dmg.sig
+            ./artifacts/**/*.exe
+            ./artifacts/**/*.exe.sig
+            ./artifacts/**/*.msi
+            ./artifacts/**/*.msi.sig
+            ./artifacts/**/*.app.tar.gz
+            ./artifacts/**/*.app.tar.gz.sig

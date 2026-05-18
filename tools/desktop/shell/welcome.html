@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Warmup — first launch</title>
+    <style>
+      * { box-sizing: border-box }
+      body {
+        font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+        margin: 0;
+        padding: 32px;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      h1 { margin: 0 0 8px; font-size: 20px }
+      p  { margin: 0 0 16px; color: #475569; font-size: 14px; line-height: 1.45 }
+      .card {
+        background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+        padding: 20px; margin-bottom: 16px;
+      }
+      .step { display: flex; align-items: center; gap: 10px; margin-bottom: 8px }
+      .step .dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: #cbd5e1;
+      }
+      .step.done .dot { background: #16a34a }
+      .step.active .dot { background: #2563eb; box-shadow: 0 0 0 4px rgba(37,99,235,0.15) }
+      input[type=password], input[type=text] {
+        width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1;
+        border-radius: 6px; font: inherit;
+      }
+      button {
+        padding: 10px 16px; border: 0; border-radius: 6px;
+        background: #2563eb; color: #fff; font: inherit; cursor: pointer;
+      }
+      button[disabled] { background: #94a3b8; cursor: not-allowed }
+      .progress {
+        height: 6px; background: #e2e8f0; border-radius: 3px;
+        overflow: hidden; margin-top: 6px;
+      }
+      .progress > div {
+        height: 100%; background: #2563eb; width: 0%;
+        transition: width 0.2s ease;
+      }
+      .progress.indeterminate > div {
+        width: 30%;
+        animation: slide 1.2s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% { transform: translateX(-100%) }
+        100% { transform: translateX(360%) }
+      }
+      .log {
+        margin-top: 8px; font: 11px ui-monospace, Menlo, monospace;
+        color: #64748b; max-height: 80px; overflow: auto;
+      }
+      .err { color: #dc2626; font-size: 13px; margin-top: 6px }
+    </style>
+  </head>
+  <body>
+    <h1>Welcome to Warmup</h1>
+    <p>One-time setup. We need your owner API token and a local copy of Chromium for the cookie-capture flow.</p>
+
+    <div class="card">
+      <div class="step active" id="step-token"><span class="dot"></span> Owner API token</div>
+      <p>Stored in your OS keychain (macOS Keychain / Windows Credential Manager). Never written to disk in plain text.</p>
+      <input type="password" id="token" placeholder="ywk_… or your OWNER token" autocomplete="off" />
+      <div class="err" id="token-err" hidden></div>
+      <div style="margin-top:12px">
+        <button id="save-token">Save token</button>
+      </div>
+    </div>
+
+    <div class="card" id="chromium-card" hidden>
+      <div class="step active" id="step-chromium"><span class="dot"></span> Chromium runtime</div>
+      <p>Downloads ~150 MB into your user cache (one-time). Runs only when you click "Capture cookies".</p>
+      <div class="progress indeterminate"><div></div></div>
+      <div class="log" id="chromium-log">starting…</div>
+      <div class="err" id="chromium-err" hidden></div>
+    </div>
+
+    <div id="finish-card" hidden>
+      <button id="finish">Continue to dashboard</button>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const { listen } = window.__TAURI__.event;
+
+      const $ = (id) => document.getElementById(id);
+      const log = (msg) => {
+        const el = $("chromium-log");
+        el.textContent = String(msg).slice(0, 200);
+      };
+
+      function markDone(stepId) {
+        const el = $(stepId);
+        el.classList.remove("active");
+        el.classList.add("done");
+      }
+
+      $("save-token").addEventListener("click", async () => {
+        const value = $("token").value.trim();
+        $("token-err").hidden = true;
+        if (!value) {
+          $("token-err").textContent = "Required.";
+          $("token-err").hidden = false;
+          return;
+        }
+        try {
+          await invoke("save_owner_token", { token: value });
+          markDone("step-token");
+          $("save-token").disabled = true;
+          $("token").disabled = true;
+          $("chromium-card").hidden = false;
+          startChromium();
+        } catch (e) {
+          $("token-err").textContent = String(e);
+          $("token-err").hidden = false;
+        }
+      });
+
+      async function startChromium() {
+        const unlisten = await listen("setup:chromium-log", (ev) => log(ev.payload));
+        try {
+          await invoke("install_chromium");
+          markDone("step-chromium");
+          const card = $("chromium-card");
+          const bar = card.querySelector(".progress");
+          bar.classList.remove("indeterminate");
+          bar.firstElementChild.style.width = "100%";
+          log("done");
+          $("finish-card").hidden = false;
+        } catch (e) {
+          $("chromium-err").textContent = String(e);
+          $("chromium-err").hidden = false;
+        } finally {
+          unlisten();
+        }
+      }
+
+      $("finish").addEventListener("click", () => invoke("finish_welcome"));
+
+      // If keychain already has a token (e.g. user reopened welcome
+      // manually), skip the token step.
+      invoke("welcome_init").then((state) => {
+        if (state && state.hasToken) {
+          $("token").value = "•".repeat(16);
+          $("token").disabled = true;
+          $("save-token").disabled = true;
+          markDone("step-token");
+          $("chromium-card").hidden = false;
+          startChromium();
+        }
+      });
+    </script>
+  </body>
+</html>

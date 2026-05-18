@@ -1,0 +1,33 @@
+{
+  "name": "warmup-desktop-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": "./dist/capture.cjs",
+  "scripts": {
+    "build:js": "esbuild src/capture.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/capture.cjs --external:playwright --external:playwright-core --external:fsevents --external:bufferutil --external:utf-8-validate --external:chromium-bidi --external:electron",
+    "build:bin": "node ./build.mjs",
+    "build": "pnpm run build:js && pnpm run build:bin"
+  },
+  "dependencies": {
+    "playwright": "1.49.1",
+    "playwright-core": "1.49.1"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "6.0.0",
+    "esbuild": "0.27.3"
+  },
+  "pkg": {
+    "scripts": [
+      "node_modules/playwright/lib/**/*.js",
+      "node_modules/playwright-core/lib/**/*.js"
+    ],
+    "assets": [
+      "node_modules/playwright/browsers.json",
+      "node_modules/playwright-core/browsers.json",
+      "node_modules/playwright-core/lib/vite/**/*",
+      "node_modules/playwright-core/bin/**/*",
+      "node_modules/playwright-core/third_party/**/*"
+    ]
+  }
+}

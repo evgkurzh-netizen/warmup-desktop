@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Warmup",
+  "version": "0.1.0",
+  "identifier": "ru.fvds.warmacc.desktop",
+  "build": {
+    "frontendDist": "../shell"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/capture"],
+    "publisher": "Warmup",
+    "category": "Productivity",
+    "shortDescription": "Warmup operator console",
+    "longDescription": "Desktop console for the Warmup service. Loads the live dashboard and runs the local cookie-capture browser."
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://warm-acc.fvds.ru/api/updates/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": "REPLACED_BY_CI_FROM_TAURI_UPDATER_PUBKEY"
+    }
+  }
+}

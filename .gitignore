@@ -1,0 +1,11 @@
+node_modules/
+tools/desktop/sidecar/dist/
+tools/desktop/sidecar/binaries/
+tools/desktop/src-tauri/target/
+tools/desktop/src-tauri/gen/
+*.log
+.DS_Store
+# Never commit signing material — it lives ONLY in GitHub Secrets:
+*.key
+*.pem
+.env*
