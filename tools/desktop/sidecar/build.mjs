@@ -58,6 +58,8 @@ const outName = targetKey === "win-x64" ? "capture.exe" : "capture";
 const outPath = resolve(repoSidecar, "dist", outName);
 
 console.log(`[sidecar] pkg target=${target.pkg} → ${outPath}`);
+// shell:true is required on Windows where there's no bare `npx` —
+// only `npx.cmd`. execFileSync without a shell can't resolve that.
 execFileSync(
   "npx",
   [
@@ -69,7 +71,7 @@ execFileSync(
     "--output",
     outPath,
   ],
-  { stdio: "inherit", cwd: repoSidecar },
+  { stdio: "inherit", cwd: repoSidecar, shell: true },
 );
 
 const ext = targetKey === "win-x64" ? ".exe" : "";

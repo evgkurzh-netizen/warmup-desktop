@@ -105,7 +105,11 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm --filter @workspace/desktop run build -- --target ${{ matrix.rustTarget }}
+        # Each matrix runner builds its native architecture, so we don't
+        # pass --target — passing it causes cargo to put the binary under
+        # target/<triple>/release/ while the Tauri bundler keeps looking
+        # in target/release/ and the build fails with "binary does not exist".
+        run: pnpm --filter @workspace/desktop run build
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
