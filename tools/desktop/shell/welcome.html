@@ -71,6 +71,17 @@
       </div>
     </div>
 
+    <div class="card" id="basic-card" hidden>
+      <div class="step active" id="step-basic"><span class="dot"></span> Dashboard login (HTTP Basic Auth)</div>
+      <p>The dashboard URL itself is protected by a separate username/password. Enter the credentials your administrator gave you — they will be stored in your OS keychain alongside the token.</p>
+      <input type="text" id="basic-user" placeholder="username" autocomplete="off" style="margin-bottom:8px" />
+      <input type="password" id="basic-pass" placeholder="password" autocomplete="off" />
+      <div class="err" id="basic-err" hidden></div>
+      <div style="margin-top:12px">
+        <button id="save-basic">Save credentials</button>
+      </div>
+    </div>
+
     <div class="card" id="chromium-card" hidden>
       <div class="step active" id="step-chromium"><span class="dot"></span> Chromium runtime</div>
       <p>Downloads ~150 MB into your user cache (one-time). Runs only when you click "Capture cookies".</p>
@@ -112,11 +123,42 @@
           markDone("step-token");
           $("save-token").disabled = true;
           $("token").disabled = true;
-          $("chromium-card").hidden = false;
-          startChromium();
+          showBasicStep();
         } catch (e) {
           $("token-err").textContent = String(e);
           $("token-err").hidden = false;
+        }
+      });
+
+      function showBasicStep() {
+        $("basic-card").hidden = false;
+      }
+
+      function skipBasicStep() {
+        markDone("step-basic");
+        $("basic-card").hidden = true;
+      }
+
+      $("save-basic").addEventListener("click", async () => {
+        const user = $("basic-user").value.trim();
+        const pass = $("basic-pass").value;
+        $("basic-err").hidden = true;
+        if (!user || !pass) {
+          $("basic-err").textContent = "Both fields are required.";
+          $("basic-err").hidden = false;
+          return;
+        }
+        try {
+          await invoke("save_basic_auth", { user, pass });
+          markDone("step-basic");
+          $("save-basic").disabled = true;
+          $("basic-user").disabled = true;
+          $("basic-pass").disabled = true;
+          $("chromium-card").hidden = false;
+          startChromium();
+        } catch (e) {
+          $("basic-err").textContent = String(e);
+          $("basic-err").hidden = false;
         }
       });
 
@@ -141,16 +183,28 @@
 
       $("finish").addEventListener("click", () => invoke("finish_welcome"));
 
-      // If keychain already has a token (e.g. user reopened welcome
-      // manually), skip the token step.
+      // If keychain already has credentials, mark those steps done
+      // automatically so the user doesn't re-enter what's already saved.
       invoke("welcome_init").then((state) => {
         if (state && state.hasToken) {
           $("token").value = "•".repeat(16);
           $("token").disabled = true;
           $("save-token").disabled = true;
           markDone("step-token");
-          $("chromium-card").hidden = false;
-          startChromium();
+          showBasicStep();
+        }
+        if (state && state.hasBasicAuth) {
+          $("basic-user").value = "•".repeat(8);
+          $("basic-pass").value = "•".repeat(12);
+          $("basic-user").disabled = true;
+          $("basic-pass").disabled = true;
+          $("save-basic").disabled = true;
+          markDone("step-basic");
+          // If both creds AND token are saved, jump straight to chromium check.
+          if (state.hasToken) {
+            $("chromium-card").hidden = false;
+            startChromium();
+          }
         }
       });
     </script>

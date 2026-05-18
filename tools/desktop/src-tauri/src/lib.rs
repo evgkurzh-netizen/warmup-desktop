@@ -42,6 +42,8 @@ const APP_BASE_URL: &str = "https://warm-acc.fvds.ru/";
 const ALLOWED_HOST: &str = "warm-acc.fvds.ru";
 const KEYRING_SERVICE: &str = "ru.fvds.warmacc.desktop";
 const KEYRING_USER: &str = "owner-token";
+const KEYRING_BASIC_USER_ITEM: &str = "basic-auth-user";
+const KEYRING_BASIC_PASS_ITEM: &str = "basic-auth-pass";
 const DEEP_LINK_SCHEME: &str = "ywk-desktop";
 
 #[derive(Default)]
@@ -62,6 +64,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             welcome_init,
             save_owner_token,
+            save_basic_auth,
             install_chromium,
             finish_welcome,
         ])
@@ -108,6 +111,28 @@ fn read_token() -> Option<String> {
 fn write_token(token: &str) -> Result<(), keyring::Error> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)?;
     entry.set_password(token)
+}
+
+fn read_keychain_item(item: &str) -> Option<String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, item).ok()?;
+    let value = entry.get_password().ok()?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn write_keychain_item(item: &str, value: &str) -> Result<(), keyring::Error> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, item)?;
+    entry.set_password(value)
+}
+
+/// Read Basic auth user+password pair from keychain, if both are present.
+fn read_basic_auth() -> Option<(String, String)> {
+    let user = read_keychain_item(KEYRING_BASIC_USER_ITEM)?;
+    let pass = read_keychain_item(KEYRING_BASIC_PASS_ITEM)?;
+    Some((user, pass))
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +199,18 @@ fn open_welcome_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewW
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     let token = read_token().unwrap_or_default();
     let init_script = build_init_script(&token);
-    let url = Url::parse(APP_BASE_URL).expect("APP_BASE_URL is valid");
+    let mut url = Url::parse(APP_BASE_URL).expect("APP_BASE_URL is valid");
+
+    // If the user provided Basic auth credentials during welcome (stored in
+    // keychain), embed them into the URL as `https://user:pass@host/`. Both
+    // WKWebView (macOS) and WebView2 (Windows) extract these credentials and
+    // cache them for the origin, so subsequent requests within the same origin
+    // also send `Authorization: Basic ...` without further prompts.
+    // `Url::set_username/set_password` performs URL-encoding for us.
+    if let Some((user, pass)) = read_basic_auth() {
+        let _ = url.set_username(&user);
+        let _ = url.set_password(Some(&pass));
+    }
 
     let nav_app = app.clone();
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
@@ -194,12 +230,14 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWind
 #[serde(rename_all = "camelCase")]
 struct WelcomeInit {
     has_token: bool,
+    has_basic_auth: bool,
 }
 
 #[tauri::command]
 async fn welcome_init() -> WelcomeInit {
     WelcomeInit {
         has_token: read_token().is_some(),
+        has_basic_auth: read_basic_auth().is_some(),
     }
 }
 
@@ -210,6 +248,22 @@ async fn save_owner_token(token: String) -> Result<(), String> {
         return Err("Token is empty".into());
     }
     write_token(trimmed).map_err(|e| format!("keychain: {e:?}"))
+}
+
+#[tauri::command]
+async fn save_basic_auth(user: String, pass: String) -> Result<(), String> {
+    let user = user.trim();
+    if user.is_empty() {
+        return Err("Username is empty".into());
+    }
+    if pass.is_empty() {
+        return Err("Password is empty".into());
+    }
+    write_keychain_item(KEYRING_BASIC_USER_ITEM, user)
+        .map_err(|e| format!("keychain (user): {e:?}"))?;
+    write_keychain_item(KEYRING_BASIC_PASS_ITEM, &pass)
+        .map_err(|e| format!("keychain (pass): {e:?}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -299,7 +353,7 @@ fn build_init_script(token: &str) -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.0",
+    version: "0.1.1",
     hasToken: !!TOKEN,
     capture: function(accountId) {{
       if (!accountId) return;
