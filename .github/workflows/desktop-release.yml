@@ -20,9 +20,6 @@ jobs:
           - os: macos-14
             sidecarTarget: darwin-arm64
             rustTarget: aarch64-apple-darwin
-          - os: macos-13
-            sidecarTarget: darwin-x64
-            rustTarget: x86_64-apple-darwin
           - os: windows-latest
             sidecarTarget: win-x64
             rustTarget: x86_64-pc-windows-msvc
