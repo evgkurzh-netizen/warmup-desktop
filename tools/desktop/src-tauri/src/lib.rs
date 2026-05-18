@@ -65,6 +65,7 @@ pub fn run() {
             welcome_init,
             save_owner_token,
             save_basic_auth,
+            get_owner_token_jit,
             install_chromium,
             finish_welcome,
         ])
@@ -199,8 +200,7 @@ fn open_welcome_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewW
 }
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
-    let token = read_token().unwrap_or_default();
-    let init_script = build_init_script(&token);
+    let init_script = build_init_script();
     let mut url = Url::parse(APP_BASE_URL).expect("APP_BASE_URL is valid");
 
     // If the user provided Basic auth credentials during welcome (stored in
@@ -250,6 +250,15 @@ async fn save_owner_token(token: String) -> Result<(), String> {
         return Err("Token is empty".into());
     }
     write_token(trimmed).map_err(|e| format!("keychain: {e:?}"))
+}
+
+/// Read the current owner token from the OS keychain. Called by the
+/// webview's init script on every page load so that token changes
+/// (welcome flow OR in-page setToken + reload) are picked up without
+/// needing an app restart. Returns "" if no token is stored.
+#[tauri::command]
+async fn get_owner_token_jit() -> String {
+    read_token().unwrap_or_default()
 }
 
 #[tauri::command]
@@ -322,25 +331,26 @@ async fn finish_welcome<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 // Init script (runs before any page JS on the main webview)
 // ---------------------------------------------------------------------------
 
-fn build_init_script(token: &str) -> String {
-    // The token is embedded into the script as an escaped JS string literal.
-    // It lives only in the wrapper-closure variable below — NOT in
-    // localStorage, sessionStorage, cookies, or anywhere else the page could
-    // read it from.
-    let token_literal =
-        serde_json::Value::String(token.to_string()).to_string();
+fn build_init_script() -> String {
+    // The token is NOT baked into this script. Instead the wrapper
+    // reads it lazily via a Tauri `invoke("get_owner_token_jit")` call
+    // that runs on every page load. This means:
+    //   - Welcome-flow token saves are picked up on the first main-
+    //     window navigation without restart.
+    //   - In-page setToken updates take effect after the script's own
+    //     `window.location.reload()`, again without restart.
+    // Until the async invoke resolves, fetch calls await it via a
+    // shared promise so the very first batch of requests do not race.
     format!(
         r#"
 (function() {{
-  var TOKEN = {token_literal};
   var ORIGIN = window.location.origin;
+  var state = {{ token: "" }};
+  var ready;
 
   // Strip embedded Basic-auth credentials from the document URL.
-  // We navigated to `https://user:pass@host/` so the engine performs
-  // the initial Basic auth, but the WHATWG Fetch spec rejects any
-  // fetch() whose URL contains userinfo. After the first navigation
-  // the engine caches credentials for the origin, so subsequent
-  // requests work without userinfo in the URL.
+  // The engine has cached them for the origin after the initial nav,
+  // but the WHATWG Fetch spec rejects fetch() on URLs with userinfo.
   try {{
     var loc = window.location;
     if (loc.username || loc.password) {{
@@ -349,19 +359,35 @@ fn build_init_script(token: &str) -> String {
     }}
   }} catch (e) {{}}
 
+  function loadToken() {{
+    try {{
+      var inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
+      if (typeof inv !== "function") return Promise.resolve();
+      return inv("get_owner_token_jit").then(function(t) {{
+        state.token = (typeof t === "string") ? t : "";
+      }}).catch(function() {{}});
+    }} catch (e) {{
+      return Promise.resolve();
+    }}
+  }}
+  ready = loadToken();
+
   var orig = window.fetch.bind(window);
-  window.fetch = function(input, init) {{
+  window.fetch = async function(input, init) {{
+    if (state.token === "") {{
+      try {{ await ready; }} catch (e) {{}}
+    }}
     init = init || {{}};
     try {{
       var urlStr = typeof input === "string"
         ? input
         : (input && input.url) || String(input);
       var u = new URL(urlStr, ORIGIN);
-      if (TOKEN && u.origin === ORIGIN && u.pathname.indexOf("/api/") === 0) {{
+      if (state.token && u.origin === ORIGIN && u.pathname.indexOf("/api/") === 0) {{
         var headers = new Headers(
           init.headers || (input && input.headers ? input.headers : undefined)
         );
-        if (!headers.has("x-api-key")) headers.set("x-api-key", TOKEN);
+        if (!headers.has("x-api-key")) headers.set("x-api-key", state.token);
         init = Object.assign({{}}, init, {{ headers: headers }});
       }}
     }} catch (e) {{}}
@@ -370,8 +396,14 @@ fn build_init_script(token: &str) -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.4",
-    hasToken: !!TOKEN,
+    version: "0.1.5",
+    // hasToken intentionally always true in desktop mode: the dashboard
+    // uses this flag to decide whether to show its "API Token" entry
+    // UI, but in desktop the token lives in the OS keychain and is
+    // pulled lazily by the fetch wrapper above. Showing the UI anyway
+    // when the keychain is empty would be more useful, but doing so
+    // requires an async check the dashboard isn't structured for.
+    hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
       window.location.href =
@@ -404,7 +436,6 @@ fn build_init_script(token: &str) -> String {
   }});
 }})();
 "#,
-        token_literal = token_literal,
         scheme = DEEP_LINK_SCHEME,
     )
 }
@@ -440,39 +471,19 @@ fn handle_navigation<R: Runtime>(app: &AppHandle<R>, url: &Url) -> bool {
             "set-token" => {
                 if let Some(value) = query.get("value") {
                     if !value.is_empty() {
-                        match write_token(value) {
-                            Err(err) => log::warn!(
+                        if let Err(err) = write_token(value) {
+                            log::warn!(
                                 "failed to persist token: {err:?}"
-                            ),
-                            Ok(()) => {
-                                // Init script captured TOKEN at window
-                                // creation time, so a plain reload would
-                                // still use the old value. Rebuild the
-                                // main window — schedule asynchronously
-                                // so we don't tear down the running
-                                // webview from inside its own navigation
-                                // handler (the deep-link iframe lives
-                                // there).
-                                let handle = app.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    tokio::time::sleep(
-                                        std::time::Duration::from_millis(150),
-                                    )
-                                    .await;
-                                    if let Some(win) =
-                                        handle.get_webview_window("main")
-                                    {
-                                        let _ = win.close();
-                                    }
-                                    if let Err(err) = open_main_window(&handle)
-                                    {
-                                        log::warn!(
-                                            "failed to reopen main window: {err:?}"
-                                        );
-                                    }
-                                });
-                            }
+                            );
                         }
+                        // The JS bridge does `window.location.reload()`
+                        // 800ms after firing this deep-link. After the
+                        // refactor below, the init script re-reads the
+                        // token from the keychain via an `invoke()` call
+                        // on every page load — so the reload picks up
+                        // the value we just wrote. No window rebuild
+                        // necessary, which used to crash the app when
+                        // Tauri exited on the last window closing.
                     }
                 }
             }
