@@ -115,15 +115,16 @@ jobs:
           # `.sig` files appear next to each artifact when
           # TAURI_SIGNING_PRIVATE_KEY is configured. The updater feed expects
           # them to be sibling assets on the GitHub Release.
+          # Without --target, cargo writes to target/release/ (not target/<triple>/release/).
           path: |
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/dmg/*.dmg
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/dmg/*.dmg.sig
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/nsis/*.exe
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/nsis/*.exe.sig
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/macos/*.app.tar.gz
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/macos/*.app.tar.gz.sig
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/msi/*.msi
-            tools/desktop/src-tauri/target/${{ matrix.rustTarget }}/release/bundle/msi/*.msi.sig
+            tools/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            tools/desktop/src-tauri/target/release/bundle/dmg/*.dmg.sig
+            tools/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            tools/desktop/src-tauri/target/release/bundle/nsis/*.exe.sig
+            tools/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            tools/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            tools/desktop/src-tauri/target/release/bundle/msi/*.msi
+            tools/desktop/src-tauri/target/release/bundle/msi/*.msi.sig
 
   release:
     needs: build
