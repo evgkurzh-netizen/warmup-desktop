@@ -370,7 +370,7 @@ fn build_init_script(token: &str) -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.3",
+    version: "0.1.4",
     hasToken: !!TOKEN,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -440,10 +440,38 @@ fn handle_navigation<R: Runtime>(app: &AppHandle<R>, url: &Url) -> bool {
             "set-token" => {
                 if let Some(value) = query.get("value") {
                     if !value.is_empty() {
-                        if let Err(err) = write_token(value) {
-                            log::warn!(
+                        match write_token(value) {
+                            Err(err) => log::warn!(
                                 "failed to persist token: {err:?}"
-                            );
+                            ),
+                            Ok(()) => {
+                                // Init script captured TOKEN at window
+                                // creation time, so a plain reload would
+                                // still use the old value. Rebuild the
+                                // main window — schedule asynchronously
+                                // so we don't tear down the running
+                                // webview from inside its own navigation
+                                // handler (the deep-link iframe lives
+                                // there).
+                                let handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_millis(150),
+                                    )
+                                    .await;
+                                    if let Some(win) =
+                                        handle.get_webview_window("main")
+                                    {
+                                        let _ = win.close();
+                                    }
+                                    if let Err(err) = open_main_window(&handle)
+                                    {
+                                        log::warn!(
+                                            "failed to reopen main window: {err:?}"
+                                        );
+                                    }
+                                });
+                            }
                         }
                     }
                 }
