@@ -363,9 +363,24 @@ fn build_init_script() -> String {
     try {{
       var inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
       if (typeof inv !== "function") return Promise.resolve();
-      return inv("get_owner_token_jit").then(function(t) {{
-        state.token = (typeof t === "string") ? t : "";
-      }}).catch(function() {{}});
+      // The first call may fail on macOS because WebKit blocks the
+      // `ipc://localhost/...` custom-protocol fetch as mixed content
+      // when the document origin is https. Tauri auto-falls back to
+      // postMessage for subsequent calls, so a short-delayed retry
+      // usually succeeds.
+      function once() {{ return inv("get_owner_token_jit"); }}
+      return once()
+        .catch(function() {{
+          return new Promise(function(resolve) {{
+            setTimeout(function() {{
+              once().then(resolve).catch(function() {{ resolve(""); }});
+            }}, 150);
+          }});
+        }})
+        .then(function(t) {{
+          state.token = (typeof t === "string") ? t : "";
+        }})
+        .catch(function() {{}});
     }} catch (e) {{
       return Promise.resolve();
     }}
@@ -396,7 +411,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.5",
+    version: "0.1.6",
     // hasToken intentionally always true in desktop mode: the dashboard
     // uses this flag to decide whether to show its "API Token" entry
     // UI, but in desktop the token lives in the OS keychain and is
