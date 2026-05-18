@@ -70,7 +70,9 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            let needs_welcome = read_token().is_none() || !chromium_installed();
+            let needs_welcome = read_token().is_none()
+                || read_basic_auth().is_none()
+                || !chromium_installed();
             if needs_welcome {
                 open_welcome_window(&handle)?;
             } else {

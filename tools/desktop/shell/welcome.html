@@ -123,7 +123,11 @@
           markDone("step-token");
           $("save-token").disabled = true;
           $("token").disabled = true;
-          showBasicStep();
+          if (typeof window.__advanceAfterToken === "function") {
+            window.__advanceAfterToken();
+          } else {
+            showBasicStep();
+          }
         } catch (e) {
           $("token-err").textContent = String(e);
           $("token-err").hidden = false;
@@ -200,11 +204,30 @@
           $("basic-pass").disabled = true;
           $("save-basic").disabled = true;
           markDone("step-basic");
-          // If both creds AND token are saved, jump straight to chromium check.
+          // Card is hidden by default; only reveal it if the token step
+          // is also done (otherwise we wait for the token step to call
+          // showBasicStep, which will then immediately advance because
+          // the save-basic flow is already complete).
           if (state.hasToken) {
+            $("basic-card").hidden = false;
             $("chromium-card").hidden = false;
             startChromium();
           }
+        }
+        // Re-evaluate progression after both steps may be already saved.
+        if (state && state.hasToken && state.hasBasicAuth) {
+          // Both already done — chromium step shown above.
+        } else if (state && state.hasBasicAuth && !state.hasToken) {
+          // After user saves the token, save-token handler calls
+          // showBasicStep which only un-hides the card. Patch the
+          // handler chain so that once the token is saved and basic is
+          // already done, we jump straight to chromium.
+          const origShow = showBasicStep;
+          window.__advanceAfterToken = function() {
+            $("basic-card").hidden = false;
+            $("chromium-card").hidden = false;
+            startChromium();
+          };
         }
       });
     </script>
