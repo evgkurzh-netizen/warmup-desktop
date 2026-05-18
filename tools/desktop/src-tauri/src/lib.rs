@@ -370,7 +370,7 @@ fn build_init_script(token: &str) -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.2",
+    version: "0.1.3",
     hasToken: !!TOKEN,
     capture: function(accountId) {{
       if (!accountId) return;
