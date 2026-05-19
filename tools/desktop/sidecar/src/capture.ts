@@ -207,10 +207,38 @@ function profileDir(accountId: string): string {
   return dir;
 }
 
+/**
+ * Brave/Chrome's persistent session manager will re-open every tab that was
+ * open at last shutdown. Because we forcibly kill the browser on SIGTERM,
+ * every aborted capture session leaves "Current Session" / "Current Tabs"
+ * snapshots behind, so the NEXT launch reopens that tab — and the one
+ * before that — turning a single click into a cascade of accounts.google
+ * tabs that keep stealing focus. Wiping these state files before launch
+ * keeps each capture session starting from a single empty tab while still
+ * preserving the Cookies / Local Storage DB we actually care about.
+ */
+function clearSessionRestoreState(userDataDir: string): void {
+  const defaults = [
+    path.join(userDataDir, "Default", "Current Session"),
+    path.join(userDataDir, "Default", "Current Tabs"),
+    path.join(userDataDir, "Default", "Last Session"),
+    path.join(userDataDir, "Default", "Last Tabs"),
+    path.join(userDataDir, "Default", "Sessions"),
+  ];
+  for (const target of defaults) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 async function launch(
   ctx: LoginContext,
 ): Promise<{ context: BrowserContext; page: Page }> {
   const userDataDir = profileDir(ctx.accountId);
+  clearSessionRestoreState(userDataDir);
   // Choose the UI locale that the browser CHROME is rendered in. This is
   // separate from the navigator.language emulation done by stealthScript and
   // by the `locale` option below. We force a Latin-script UI so the address
@@ -222,12 +250,20 @@ async function launch(
     : "en-US";
   const launchOptions = {
     headless: false,
+    // Drop Playwright's default `--enable-automation` flag. It is THE single
+    // strongest tell for Google's "this browser or app may not be secure"
+    // gate: it sets `navigator.webdriver = true`, surfaces the "Chrome is
+    // being controlled by automated test software" infobar, and disables a
+    // few Chrome features (e.g. password manager) Google's bot detection
+    // looks for. With this removed Brave/Chrome looks like a normal
+    // user-launched session.
+    ignoreDefaultArgs: ["--enable-automation"],
     args: [
-      "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
+      "--disable-features=Translate,InfiniteSessionRestore",
       `--lang=${uiLang}`,
     ],
     userAgent: ctx.fingerprint.userAgent,
