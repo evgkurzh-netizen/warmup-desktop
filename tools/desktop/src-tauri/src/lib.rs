@@ -451,7 +451,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.20</span>' +
+      '<span id="__ywk_diag_v__">v0.1.21</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -550,7 +550,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.20",
+    version: "0.1.21",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -824,13 +824,20 @@ async fn run_capture<R: Runtime>(
             }
             CommandEvent::Terminated(payload) => {
                 let code = payload.code.unwrap_or(0);
+                let signal = payload.signal;
                 push_event(
                     app,
                     &CaptureEvent::Progress {
-                        message: format!("terminated code={code}"),
+                        message: format!(
+                            "terminated code={code} signal={}",
+                            signal
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "none".into()),
+                        ),
                     },
                 );
-                if code != 0 && !saw_error_event {
+                let killed_by_signal = signal.is_some();
+                if (code != 0 || killed_by_signal) && !saw_error_event {
                     let msg = if last_stderr.is_empty() {
                         format!("capture exited with code {code}")
                     } else {
