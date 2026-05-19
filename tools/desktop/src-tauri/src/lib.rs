@@ -438,7 +438,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333", "pointer-events:auto"
     ].join(";");
     div.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.10</span>' +
+      '<span id="__ywk_diag_v__">v0.1.11</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_last__" style="flex:1;text-align:right">no /api/ calls yet</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
@@ -529,12 +529,22 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.10",
+    version: "0.1.11",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
-      window.location.href =
+      try {{ setDiagLast("DEEP", "capture?account=" + accountId.slice(0,8), "sent"); }} catch (e) {{}}
+      // Use a hidden iframe instead of top-level navigation -- in Tauri 2
+      // the navigation handler reliably fires for iframe loads but
+      // sometimes silently ignores `window.location.href = "scheme://..."`.
+      var iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src =
         "{scheme}://capture?account=" + encodeURIComponent(accountId);
+      document.body.appendChild(iframe);
+      setTimeout(function() {{
+        try {{ iframe.remove(); }} catch (e) {{}}
+      }}, 500);
     }},
     setToken: function(value) {{
       if (!value) return;
@@ -558,6 +568,21 @@ fn build_init_script() -> String {
       }};
     }},
     _onEvent: function(ev) {{
+      // Mirror to the diagnostic overlay so the user can see capture
+      // sidecar progress / errors even when the dashboard's own toast
+      // UI does not show them.
+      try {{
+        var l = document.getElementById("__ywk_diag_last__");
+        if (l && ev && ev.type) {{
+          var summary = "[" + ev.type + "]";
+          if (ev.message) summary += " " + ev.message;
+          else if (ev.cookie_count != null) summary += " cookies=" + ev.cookie_count;
+          else if (ev.label) summary += " " + ev.label;
+          l.style.color = ev.type === "error" ? "#f55"
+            : (ev.type === "done" ? "#0f0" : "#ff0");
+          l.textContent = summary;
+        }}
+      }} catch (e) {{}}
       for (var i = 0; i < listeners.length; i++) {{
         try {{ listeners[i](ev); }} catch (e) {{}}
       }}
