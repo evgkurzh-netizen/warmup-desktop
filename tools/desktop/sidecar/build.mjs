@@ -79,6 +79,20 @@ execFileSync(
   { stdio: "inherit", cwd: repoSidecar, shell: true },
 );
 
+// pkg works by appending the bundled script + V8 snapshot to the end of
+// the base Node binary. On macOS that invalidates the ad-hoc signature
+// the pkg-fetched binary ships with -- macOS 15 / Apple Silicon then
+// kills the process with SIGTRAP at first exec because the Mach-O loader
+// refuses to load an unsigned/mis-signed binary. Re-sign ad-hoc to make
+// the loader happy. `-s -` = ad-hoc, `--force` overrides any existing
+// (broken) signature.
+if (targetKey === "darwin-arm64" || targetKey === "darwin-x64") {
+  console.log(`[sidecar] re-signing ${outPath} (ad-hoc) …`);
+  execFileSync("codesign", ["--force", "--sign", "-", outPath], {
+    stdio: "inherit",
+  });
+}
+
 const ext = targetKey === "win-x64" ? ".exe" : "";
 const finalPath = resolve(tauriBinaries, `capture-${target.triple}${ext}`);
 copyFileSync(outPath, finalPath);
