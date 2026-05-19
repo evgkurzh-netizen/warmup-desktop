@@ -429,37 +429,57 @@ fn build_init_script() -> String {
   function ensureDiag() {{
     if (!document.body) return;
     if (document.getElementById("__ywk_diag__")) return;
-    var div = document.createElement("div");
-    div.id = "__ywk_diag__";
-    div.style.cssText = [
+    var wrap = document.createElement("div");
+    wrap.id = "__ywk_diag__";
+    wrap.style.cssText = [
       "position:fixed", "bottom:0", "left:0", "right:0",
-      "z-index:2147483647", "background:rgba(0,0,0,0.85)", "color:#0f0",
+      "z-index:2147483647", "pointer-events:auto"
+    ].join(";");
+    var log = document.createElement("div");
+    log.id = "__ywk_diag_log__";
+    log.style.cssText = [
+      "background:rgba(0,0,0,0.85)", "color:#0f0",
+      "font:11px/1.4 ui-monospace,monospace", "padding:4px 8px",
+      "max-height:160px", "overflow-y:auto",
+      "border-top:1px solid #333", "white-space:pre-wrap"
+    ].join(";");
+    var bar = document.createElement("div");
+    bar.style.cssText = [
+      "background:rgba(0,0,0,0.85)", "color:#0f0",
       "font:11px/1.4 ui-monospace,monospace", "padding:4px 8px",
       "display:flex", "gap:16px", "justify-content:space-between",
-      "border-top:1px solid #333", "pointer-events:auto"
+      "border-top:1px solid #333"
     ].join(";");
-    div.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.13</span>' +
+    bar.innerHTML =
+      '<span id="__ywk_diag_v__">v0.1.14</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
-      '<span id="__ywk_diag_last__" style="flex:1;text-align:right">no /api/ calls yet</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
-    document.body.appendChild(div);
+    wrap.appendChild(log);
+    wrap.appendChild(bar);
+    document.body.appendChild(wrap);
     var x = document.getElementById("__ywk_diag_x__");
-    if (x) x.onclick = function() {{ div.style.display = "none"; }};
+    if (x) x.onclick = function() {{ wrap.style.display = "none"; }};
     updateDiagToken();
   }}
   function updateDiagToken() {{
     var t = document.getElementById("__ywk_diag_token__");
     if (t) t.textContent = "Token: " + tokenLabel();
   }}
+  function pushDiagLine(text, color) {{
+    var l = document.getElementById("__ywk_diag_log__");
+    if (!l) return;
+    var line = document.createElement("div");
+    if (color) line.style.color = color;
+    var d = new Date();
+    var ts = ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);
+    line.textContent = ts + " " + text;
+    l.appendChild(line);
+    while (l.childNodes.length > 16) l.removeChild(l.firstChild);
+    l.scrollTop = l.scrollHeight;
+  }}
   function setDiagLast(method, urlPath, status) {{
-    var l = document.getElementById("__ywk_diag_last__");
-    if (l) {{
-      var color = (typeof status === "number" && status >= 200 && status < 300)
-        ? "#0f0" : "#f55";
-      l.style.color = color;
-      l.textContent = method + " " + urlPath + " -> " + status;
-    }}
+    var ok = (typeof status === "number" && status >= 200 && status < 300);
+    pushDiagLine(method + " " + urlPath + " -> " + status, ok ? "#0f0" : "#f55");
   }}
   if (document.readyState === "loading") {{
     document.addEventListener("DOMContentLoaded", ensureDiag);
@@ -530,11 +550,11 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.13",
+    version: "0.1.14",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
-      try {{ setDiagLast("INV", "capture_account " + accountId.slice(0,8), "calling"); }} catch (e) {{}}
+      try {{ pushDiagLine("INV capture_account " + accountId.slice(0,8) + " calling", "#ff0"); }} catch (e) {{}}
       // Prefer the standard Tauri invoke channel -- in Tauri 2 the global
       // bridge falls back to postMessage when ipc:// is blocked by mixed
       // content rules on https:// origins. The iframe deep-link path
@@ -544,26 +564,14 @@ fn build_init_script() -> String {
                    (window.__TAURI_INTERNALS__ ? window.__TAURI_INTERNALS__ : null);
         if (core && typeof core.invoke === "function") {{
           core.invoke("capture_account", {{ accountId: accountId }}).then(function() {{
-            try {{ setDiagLast("INV", "capture_account " + accountId.slice(0,8), "ok"); }} catch (e) {{}}
+            try {{ pushDiagLine("INV capture_account " + accountId.slice(0,8) + " ok", "#0f0"); }} catch (e) {{}}
           }}).catch(function(err) {{
-            try {{
-              var l = document.getElementById("__ywk_diag_last__");
-              if (l) {{
-                l.style.color = "#f55";
-                l.textContent = "[invoke error] " + (err && err.message ? err.message : err);
-              }}
-            }} catch (e) {{}}
+            try {{ pushDiagLine("[invoke error] " + (err && err.message ? err.message : err), "#f55"); }} catch (e) {{}}
           }});
           return;
         }}
       }} catch (e) {{}}
-      try {{
-        var l = document.getElementById("__ywk_diag_last__");
-        if (l) {{
-          l.style.color = "#f55";
-          l.textContent = "[error] window.__TAURI__ unavailable";
-        }}
-      }} catch (e) {{}}
+      try {{ pushDiagLine("[error] window.__TAURI__ unavailable", "#f55"); }} catch (e) {{}}
     }},
     setToken: function(value) {{
       if (!value) return;
@@ -591,15 +599,14 @@ fn build_init_script() -> String {
       // sidecar progress / errors even when the dashboard's own toast
       // UI does not show them.
       try {{
-        var l = document.getElementById("__ywk_diag_last__");
-        if (l && ev && ev.type) {{
+        if (ev && ev.type) {{
           var summary = "[" + ev.type + "]";
           if (ev.message) summary += " " + ev.message;
           else if (ev.cookie_count != null) summary += " cookies=" + ev.cookie_count;
           else if (ev.label) summary += " " + ev.label;
-          l.style.color = ev.type === "error" ? "#f55"
+          var color = ev.type === "error" ? "#f55"
             : (ev.type === "done" ? "#0f0" : "#ff0");
-          l.textContent = summary;
+          pushDiagLine(summary, color);
         }}
       }} catch (e) {{}}
       for (var i = 0; i < listeners.length; i++) {{
