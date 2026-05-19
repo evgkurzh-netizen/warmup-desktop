@@ -360,7 +360,7 @@ fn build_init_script() -> String {
     // deep-link), the Rust handler evals `__YWK_TOKEN_UPDATE__(value)`
     // directly into this window, so no reload is needed at all.
     format!(
-        r#"
+        r##"
 (function() {{
   var ORIGIN = window.location.origin;
   var state = {{ token: "" }};
@@ -435,7 +435,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.7",
+    version: "0.1.8",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -470,7 +470,7 @@ fn build_init_script() -> String {
     }}
   }});
 }})();
-"#,
+"##,
         scheme = DEEP_LINK_SCHEME,
     )
 }
