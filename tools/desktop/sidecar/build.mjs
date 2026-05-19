@@ -60,6 +60,12 @@ const outPath = resolve(repoSidecar, "dist", outName);
 console.log(`[sidecar] pkg target=${target.pkg} → ${outPath}`);
 // shell:true is required on Windows where there's no bare `npx` —
 // only `npx.cmd`. execFileSync without a shell can't resolve that.
+// --options bakes V8 startup flags into the binary. `jitless` is required
+// on macOS 15 / Apple Silicon where the pkg-bundled Node otherwise aborts
+// at startup with "Fatal process OOM in Failed to reserve virtual memory
+// for CodeRange". The flag cannot be passed via NODE_OPTIONS (V8 flags are
+// not in Node's allowlist), so it has to be embedded at build time.
+// Harmless on Windows.
 execFileSync(
   "npx",
   [
@@ -68,6 +74,8 @@ execFileSync(
     entry,
     "--target",
     target.pkg,
+    "--options",
+    "jitless",
     "--output",
     outPath,
   ],
