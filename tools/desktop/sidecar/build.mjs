@@ -24,11 +24,16 @@ const args = Object.fromEntries(
 );
 
 // pkg target string → Tauri target-triple.
+// Node 22 is required on macOS 15 / Apple Silicon: the V8 in Node 20 fails
+// at startup with "Fatal process OOM in Failed to reserve virtual memory for
+// CodeRange" because of macOS 15's new VM layout. The fix landed in V8 12.x
+// (shipped in Node 22). Windows/Linux work fine with either; keep them on
+// 22 for parity.
 const TARGETS = {
-  "darwin-arm64": { pkg: "node20-macos-arm64", triple: "aarch64-apple-darwin" },
-  "darwin-x64": { pkg: "node20-macos-x64", triple: "x86_64-apple-darwin" },
-  "win-x64": { pkg: "node20-win-x64", triple: "x86_64-pc-windows-msvc" },
-  "linux-x64": { pkg: "node20-linux-x64", triple: "x86_64-unknown-linux-gnu" },
+  "darwin-arm64": { pkg: "node22-macos-arm64", triple: "aarch64-apple-darwin" },
+  "darwin-x64": { pkg: "node22-macos-x64", triple: "x86_64-apple-darwin" },
+  "win-x64": { pkg: "node22-win-x64", triple: "x86_64-pc-windows-msvc" },
+  "linux-x64": { pkg: "node22-linux-x64", triple: "x86_64-unknown-linux-gnu" },
 };
 
 const hostTarget = (() => {
@@ -60,13 +65,6 @@ const outPath = resolve(repoSidecar, "dist", outName);
 console.log(`[sidecar] pkg target=${target.pkg} → ${outPath}`);
 // shell:true is required on Windows where there's no bare `npx` —
 // only `npx.cmd`. execFileSync without a shell can't resolve that.
-// --options bakes V8 startup flags into the binary. On macOS 15 / Apple
-// Silicon the default 128 MB CodeRange reservation fails at startup with
-// "Fatal process OOM in Failed to reserve virtual memory for CodeRange";
-// shrinking it to 64 MB lets V8 start without disabling JIT or WebAssembly
-// (which `--jitless` does, breaking Node's undici-backed fetch). The flag
-// cannot be passed via NODE_OPTIONS (V8 flags are not in Node's allowlist),
-// so it has to be embedded at build time. Harmless on Windows.
 execFileSync(
   "npx",
   [
@@ -75,8 +73,6 @@ execFileSync(
     entry,
     "--target",
     target.pkg,
-    "--options",
-    "code-range-size=64",
     "--output",
     outPath,
   ],
