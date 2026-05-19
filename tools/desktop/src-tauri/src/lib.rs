@@ -451,7 +451,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.14</span>' +
+      '<span id="__ywk_diag_v__">v0.1.15</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -550,7 +550,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.14",
+    version: "0.1.15",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -751,11 +751,13 @@ async fn run_capture<R: Runtime>(
     app: &AppHandle<R>,
     account_id: &str,
 ) -> Result<(), String> {
+    push_event(app, &CaptureEvent::Progress { message: "run_capture: reading token".into() });
     let token = read_token().ok_or_else(|| {
         "No owner token in keychain — re-run first-launch setup.".to_string()
     })?;
 
     let shell = app.shell();
+    push_event(app, &CaptureEvent::Progress { message: "run_capture: resolving sidecar".into() });
     let cmd = shell
         .sidecar("capture")
         .map_err(|e| format!("sidecar not bundled: {e}"))?
@@ -769,20 +771,32 @@ async fn run_capture<R: Runtime>(
             "--emit-json",
         ]);
 
-    let (mut rx, _child) = cmd.spawn().map_err(|e| e.to_string())?;
+    push_event(app, &CaptureEvent::Progress { message: "run_capture: spawning".into() });
+    let (mut rx, _child) = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    push_event(app, &CaptureEvent::Progress { message: "run_capture: spawned, awaiting output".into() });
     let mut saw_error_event = false;
     let mut last_stderr = String::new();
     while let Some(ev) = rx.recv().await {
         match ev {
             CommandEvent::Stdout(line) => {
                 let text = String::from_utf8_lossy(&line).to_string();
+                let trimmed = text.trim();
                 if let Ok(parsed) =
-                    serde_json::from_str::<CaptureEvent>(text.trim())
+                    serde_json::from_str::<CaptureEvent>(trimmed)
                 {
                     if matches!(parsed, CaptureEvent::Error { .. }) {
                         saw_error_event = true;
                     }
                     push_event(app, &parsed);
+                } else if !trimmed.is_empty() {
+                    // Non-JSON stdout (e.g. install-chromium mode lines) —
+                    // surface it as a progress event so we don't lose it.
+                    push_event(
+                        app,
+                        &CaptureEvent::Progress {
+                            message: format!("stdout: {trimmed}"),
+                        },
+                    );
                 }
             }
             CommandEvent::Stderr(line) => {
@@ -790,11 +804,26 @@ async fn run_capture<R: Runtime>(
                     String::from_utf8_lossy(&line).trim().to_string();
                 if !text.is_empty() {
                     log::warn!("[capture stderr] {text}");
+                    // Also forward to the overlay so users can see why the
+                    // sidecar process is failing (missing Chromium, missing
+                    // .node binding from pkg, etc.).
+                    push_event(
+                        app,
+                        &CaptureEvent::Progress {
+                            message: format!("stderr: {text}"),
+                        },
+                    );
                     last_stderr = text;
                 }
             }
             CommandEvent::Terminated(payload) => {
                 let code = payload.code.unwrap_or(0);
+                push_event(
+                    app,
+                    &CaptureEvent::Progress {
+                        message: format!("terminated code={code}"),
+                    },
+                );
                 if code != 0 && !saw_error_event {
                     let msg = if last_stderr.is_empty() {
                         format!("capture exited with code {code}")
