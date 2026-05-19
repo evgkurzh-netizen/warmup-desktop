@@ -59,9 +59,18 @@ struct SetupState {
 /// reject duplicate spawns when the user double-clicks Capture and (b) kill
 /// the whole tree when the desktop app exits — otherwise orphaned Chromium
 /// windows keep popping up after the user closes Warmup.
+/// Slot in the capture registry. `Reserved` means a spawn is in flight —
+/// kept distinct from `Live` so the duplicate-capture guard is atomic with
+/// respect to `Shell::spawn()`, and so `ExitRequested` doesn't try to kill a
+/// child that doesn't exist yet.
+enum CaptureSlot {
+    Reserved,
+    Live(CommandChild),
+}
+
 #[derive(Default)]
 struct CaptureRegistry {
-    children: std::sync::Mutex<HashMap<String, CommandChild>>,
+    children: std::sync::Mutex<HashMap<String, CaptureSlot>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -116,9 +125,11 @@ pub fn run() {
                 // Warmup.
                 if let Some(reg) = app_handle.try_state::<Arc<CaptureRegistry>>() {
                     let mut map = reg.children.lock().unwrap();
-                    for (account, child) in map.drain() {
-                        log::info!("killing capture sidecar for {account} on exit");
-                        let _ = child.kill();
+                    for (account, slot) in map.drain() {
+                        if let CaptureSlot::Live(child) = slot {
+                            log::info!("killing capture sidecar for {account} on exit");
+                            let _ = child.kill();
+                        }
                     }
                 }
             }
@@ -478,7 +489,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.25</span>' +
+      '<span id="__ywk_diag_v__">v0.1.26</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -577,7 +588,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.25",
+    version: "0.1.26",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -807,21 +818,32 @@ async fn run_capture<R: Runtime>(
     // Reject a second concurrent capture for the same account — that's how
     // users ended up with 5+ Chromium windows opening on top of each other
     // by clicking Capture repeatedly while the first browser was still up.
+    // Atomically reserve the slot BEFORE spawn so two concurrent invokes
+    // can't both pass the check-and-insert window.
     let registry = app.state::<Arc<CaptureRegistry>>().inner().clone();
     {
-        let map = registry.children.lock().unwrap();
+        let mut map = registry.children.lock().unwrap();
         if map.contains_key(account_id) {
             return Err(
                 "A capture browser is already open for this account. Finish or close it first.".into(),
             );
         }
+        map.insert(account_id.to_string(), CaptureSlot::Reserved);
     }
 
     push_event(app, &CaptureEvent::Progress { message: "run_capture: spawning".into() });
-    let (mut rx, child) = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let (mut rx, child) = match cmd.spawn() {
+        Ok(pair) => pair,
+        Err(e) => {
+            // Clear the reservation so the next click can retry.
+            let mut map = registry.children.lock().unwrap();
+            map.remove(account_id);
+            return Err(format!("spawn failed: {e}"));
+        }
+    };
     {
         let mut map = registry.children.lock().unwrap();
-        map.insert(account_id.to_string(), child);
+        map.insert(account_id.to_string(), CaptureSlot::Live(child));
     }
     push_event(app, &CaptureEvent::Progress { message: "run_capture: spawned, awaiting output".into() });
     let mut saw_error_event = false;
