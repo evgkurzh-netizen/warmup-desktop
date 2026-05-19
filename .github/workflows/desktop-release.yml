@@ -11,6 +11,13 @@ on:
       - "desktop-v*"
   workflow_dispatch:
 
+# Opt into Node 24 for JS-based GitHub Actions before it becomes default
+# (Jun 2 2026). Silences the deprecation warning emitted by actions/*@v4
+# which still ship a Node 20 runtime. Has no effect on our Tauri/Node 20
+# build steps -- those use `actions/setup-node` with their own version.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     strategy:
