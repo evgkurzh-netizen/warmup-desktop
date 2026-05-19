@@ -414,28 +414,104 @@ fn build_init_script() -> String {
     }} catch (e) {{}}
   }};
 
+  // -- Diagnostic overlay --------------------------------------------------
+  // Always-on status bar at the bottom of the window. The user reported
+  // the dashboard renders empty and they cannot reliably copy the WebKit
+  // inspector console, so we surface the key facts (token presence and
+  // the most recent /api/* response) directly on the page.
+  function tokenLabel() {{
+    var tok = state.token || "";
+    if (!tok) return "EMPTY";
+    if (tok.length <= 8) return "***";
+    return tok.slice(0, 4) + "..." + tok.slice(-4) + " (" + tok.length + ")";
+  }}
+  function ensureDiag() {{
+    if (!document.body) return;
+    if (document.getElementById("__ywk_diag__")) return;
+    var div = document.createElement("div");
+    div.id = "__ywk_diag__";
+    div.style.cssText = [
+      "position:fixed", "bottom:0", "left:0", "right:0",
+      "z-index:2147483647", "background:rgba(0,0,0,0.85)", "color:#0f0",
+      "font:11px/1.4 ui-monospace,monospace", "padding:4px 8px",
+      "display:flex", "gap:16px", "justify-content:space-between",
+      "border-top:1px solid #333", "pointer-events:auto"
+    ].join(";");
+    div.innerHTML =
+      '<span id="__ywk_diag_v__">v0.1.9</span>' +
+      '<span id="__ywk_diag_token__">Token: ?</span>' +
+      '<span id="__ywk_diag_last__" style="flex:1;text-align:right">no /api/ calls yet</span>' +
+      '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
+    document.body.appendChild(div);
+    var x = document.getElementById("__ywk_diag_x__");
+    if (x) x.onclick = function() {{ div.style.display = "none"; }};
+    updateDiagToken();
+  }}
+  function updateDiagToken() {{
+    var t = document.getElementById("__ywk_diag_token__");
+    if (t) t.textContent = "Token: " + tokenLabel();
+  }}
+  function setDiagLast(method, urlPath, status) {{
+    var l = document.getElementById("__ywk_diag_last__");
+    if (l) {{
+      var color = (typeof status === "number" && status >= 200 && status < 300)
+        ? "#0f0" : "#f55";
+      l.style.color = color;
+      l.textContent = method + " " + urlPath + " -> " + status;
+    }}
+  }}
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", ensureDiag);
+  }} else {{
+    ensureDiag();
+  }}
+
+  // Wrap __YWK_TOKEN_UPDATE__ to refresh diag label on every change.
+  var _origUpdate = window.__YWK_TOKEN_UPDATE__;
+  window.__YWK_TOKEN_UPDATE__ = function(v) {{
+    try {{ _origUpdate(v); }} catch (e) {{}}
+    try {{ updateDiagToken(); }} catch (e) {{}}
+  }};
+
   var orig = window.fetch.bind(window);
   window.fetch = function(input, init) {{
     init = init || {{}};
+    var method = (init && init.method) || (input && input.method) || "GET";
+    method = String(method).toUpperCase();
+    var pathForDiag = "";
     try {{
       var urlStr = typeof input === "string"
         ? input
         : (input && input.url) || String(input);
       var u = new URL(urlStr, ORIGIN);
-      if (state.token && u.origin === ORIGIN && u.pathname.indexOf("/api/") === 0) {{
-        var headers = new Headers(
-          init.headers || (input && input.headers ? input.headers : undefined)
-        );
-        if (!headers.has("x-api-key")) headers.set("x-api-key", state.token);
-        init = Object.assign({{}}, init, {{ headers: headers }});
+      if (u.origin === ORIGIN && u.pathname.indexOf("/api/") === 0) {{
+        pathForDiag = u.pathname;
+        if (state.token) {{
+          var headers = new Headers(
+            init.headers || (input && input.headers ? input.headers : undefined)
+          );
+          if (!headers.has("x-api-key")) headers.set("x-api-key", state.token);
+          init = Object.assign({{}}, init, {{ headers: headers }});
+        }}
       }}
     }} catch (e) {{}}
-    return orig(input, init);
+    var p = orig(input, init);
+    if (pathForDiag) {{
+      p.then(function(r) {{
+        try {{
+          setDiagLast(method, pathForDiag,
+            r.status + (state.token ? "" : " (NO TOKEN)"));
+        }} catch (e) {{}}
+      }}).catch(function(err) {{
+        try {{ setDiagLast(method, pathForDiag, "ERR " + (err && err.message ? err.message : err)); }} catch (e) {{}}
+      }});
+    }}
+    return p;
   }};
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.8",
+    version: "0.1.9",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
