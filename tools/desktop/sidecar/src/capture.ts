@@ -137,6 +137,64 @@ const GOOGLE_LOGIN_COOKIES = [
   "__Secure-1PSID",
 ];
 
+/**
+ * Locate a real Chromium-based browser the user already has installed.
+ * Playwright's `channel: "chrome"` only works when Chrome is at the exact
+ * standard system path AND has been registered via `playwright install
+ * chrome`. We bypass that by probing the disk ourselves and passing
+ * `executablePath` directly — this is far more reliable across user
+ * machines, including ones where Chrome was installed under
+ * ~/Applications, Brave is installed instead of Chrome, or only Edge is
+ * present.
+ *
+ * Returns `null` when no real browser is found; the caller falls back to
+ * the bundled Playwright Chromium (which Google's sign-in flow blocks,
+ * but we keep it for environments without a real browser, e.g. CI).
+ */
+function findRealBrowserPath(): { path: string; name: string } | null {
+  const candidates: Array<{ path: string; name: string }> = [];
+  if (process.platform === "darwin") {
+    const home = os.homedir();
+    for (const root of ["/Applications", path.join(home, "Applications")]) {
+      candidates.push(
+        { path: path.join(root, "Google Chrome.app/Contents/MacOS/Google Chrome"), name: "Google Chrome" },
+        { path: path.join(root, "Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"), name: "Google Chrome Beta" },
+        { path: path.join(root, "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"), name: "Google Chrome Canary" },
+        { path: path.join(root, "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"), name: "Microsoft Edge" },
+        { path: path.join(root, "Brave Browser.app/Contents/MacOS/Brave Browser"), name: "Brave Browser" },
+        { path: path.join(root, "Arc.app/Contents/MacOS/Arc"), name: "Arc" },
+      );
+    }
+  } else if (process.platform === "win32") {
+    const pf = process.env["ProgramFiles"] ?? "C:\\Program Files";
+    const pfx86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+    const lad = process.env["LOCALAPPDATA"] ?? path.join(os.homedir(), "AppData", "Local");
+    candidates.push(
+      { path: path.join(pf, "Google", "Chrome", "Application", "chrome.exe"), name: "Google Chrome" },
+      { path: path.join(pfx86, "Google", "Chrome", "Application", "chrome.exe"), name: "Google Chrome" },
+      { path: path.join(lad, "Google", "Chrome", "Application", "chrome.exe"), name: "Google Chrome" },
+      { path: path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"), name: "Microsoft Edge" },
+      { path: path.join(pfx86, "Microsoft", "Edge", "Application", "msedge.exe"), name: "Microsoft Edge" },
+      { path: path.join(lad, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"), name: "Brave Browser" },
+    );
+  } else {
+    candidates.push(
+      { path: "/usr/bin/google-chrome", name: "Google Chrome" },
+      { path: "/usr/bin/google-chrome-stable", name: "Google Chrome" },
+      { path: "/usr/bin/microsoft-edge", name: "Microsoft Edge" },
+      { path: "/usr/bin/brave-browser", name: "Brave Browser" },
+    );
+  }
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c.path)) return c;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 function profileDir(accountId: string): string {
   const base =
     process.platform === "darwin"
@@ -192,23 +250,32 @@ async function launch(
       : undefined,
   };
 
-  // Try the user's REAL Chrome first. Google's sign-in flow blocks
-  // Playwright's vanilla Chromium build with "This browser or app may not be
-  // secure" because it ships without Widevine and several Google-only API
-  // keys baked into Chrome. Falling back to the bundled Chromium only when
-  // Chrome isn't installed keeps the welcome flow working on machines
-  // without Chrome (e.g. fresh CI).
+  // Try the user's REAL browser first. Google's sign-in flow blocks
+  // Playwright's vanilla Chromium with "This browser or app may not be
+  // secure" because it ships without Widevine and Google's baked-in API
+  // keys. Probing the disk ourselves works around Playwright's `channel:
+  // "chrome"` requiring `playwright install chrome` to register the path,
+  // and lets us also accept Edge, Brave, Arc, etc.
   let context: BrowserContext;
-  try {
-    context = await chromium.launchPersistentContext(userDataDir, {
-      ...launchOptions,
-      channel: "chrome",
-    });
-    emit({ type: "progress", message: "using system Chrome channel" });
-  } catch (err) {
+  const realBrowser = findRealBrowserPath();
+  if (realBrowser) {
+    try {
+      context = await chromium.launchPersistentContext(userDataDir, {
+        ...launchOptions,
+        executablePath: realBrowser.path,
+      });
+      emit({ type: "progress", message: `using ${realBrowser.name} at ${realBrowser.path}` });
+    } catch (err) {
+      emit({
+        type: "progress",
+        message: `${realBrowser.name} launch failed (${err instanceof Error ? err.message : String(err)}); using bundled chromium — Google may block`,
+      });
+      context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+    }
+  } else {
     emit({
       type: "progress",
-      message: `system Chrome unavailable (${err instanceof Error ? err.message : String(err)}); using bundled chromium`,
+      message: "No Chrome/Edge/Brave installed; using bundled Chromium. Google's sign-in will likely block this browser — install Google Chrome and retry.",
     });
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   }
