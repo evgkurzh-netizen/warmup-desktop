@@ -451,7 +451,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.15</span>' +
+      '<span id="__ywk_diag_v__">v0.1.16</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -550,7 +550,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.15",
+    version: "0.1.16",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -769,7 +769,14 @@ async fn run_capture<R: Runtime>(
             "--account",
             account_id,
             "--emit-json",
-        ]);
+        ])
+        // On macOS 15 / Apple Silicon the pkg-bundled Node binary fails at
+        // startup with "Fatal process OOM in Failed to reserve virtual memory
+        // for CodeRange" because V8 cannot allocate its JIT CodeRange under
+        // the system's hardened runtime / VM layout. `--jitless` makes V8
+        // skip the CodeRange reservation and run the bytecode interpreter
+        // only -- slower but functional. Same flag is harmless on Windows.
+        .env("NODE_OPTIONS", "--jitless");
 
     push_event(app, &CaptureEvent::Progress { message: "run_capture: spawning".into() });
     let (mut rx, _child) = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
