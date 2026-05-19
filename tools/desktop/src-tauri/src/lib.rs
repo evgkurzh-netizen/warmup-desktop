@@ -68,6 +68,7 @@ pub fn run() {
             get_owner_token_jit,
             install_chromium,
             finish_welcome,
+            capture_account,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -438,7 +439,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333", "pointer-events:auto"
     ].join(";");
     div.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.11</span>' +
+      '<span id="__ywk_diag_v__">v0.1.12</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_last__" style="flex:1;text-align:right">no /api/ calls yet</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
@@ -529,22 +530,40 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.11",
+    version: "0.1.12",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
-      try {{ setDiagLast("DEEP", "capture?account=" + accountId.slice(0,8), "sent"); }} catch (e) {{}}
-      // Use a hidden iframe instead of top-level navigation -- in Tauri 2
-      // the navigation handler reliably fires for iframe loads but
-      // sometimes silently ignores `window.location.href = "scheme://..."`.
-      var iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src =
-        "{scheme}://capture?account=" + encodeURIComponent(accountId);
-      document.body.appendChild(iframe);
-      setTimeout(function() {{
-        try {{ iframe.remove(); }} catch (e) {{}}
-      }}, 500);
+      try {{ setDiagLast("INV", "capture_account " + accountId.slice(0,8), "calling"); }} catch (e) {{}}
+      // Prefer the standard Tauri invoke channel -- in Tauri 2 the global
+      // bridge falls back to postMessage when ipc:// is blocked by mixed
+      // content rules on https:// origins. The iframe deep-link path
+      // turned out unreliable for custom schemes in subframes.
+      try {{
+        var core = (window.__TAURI__ && window.__TAURI__.core) ||
+                   (window.__TAURI_INTERNALS__ ? window.__TAURI_INTERNALS__ : null);
+        if (core && typeof core.invoke === "function") {{
+          core.invoke("capture_account", {{ accountId: accountId }}).then(function() {{
+            try {{ setDiagLast("INV", "capture_account " + accountId.slice(0,8), "ok"); }} catch (e) {{}}
+          }}).catch(function(err) {{
+            try {{
+              var l = document.getElementById("__ywk_diag_last__");
+              if (l) {{
+                l.style.color = "#f55";
+                l.textContent = "[invoke error] " + (err && err.message ? err.message : err);
+              }}
+            }} catch (e) {{}}
+          }});
+          return;
+        }}
+      }} catch (e) {{}}
+      try {{
+        var l = document.getElementById("__ywk_diag_last__");
+        if (l) {{
+          l.style.color = "#f55";
+          l.textContent = "[error] window.__TAURI__ unavailable";
+        }}
+      }} catch (e) {{}}
     }},
     setToken: function(value) {{
       if (!value) return;
@@ -597,6 +616,35 @@ fn build_init_script() -> String {
 // ---------------------------------------------------------------------------
 // Navigation interception
 // ---------------------------------------------------------------------------
+
+/// Fire-and-forget command exposed to the dashboard via `window.__TAURI__`
+/// (postMessage transport). Replaces the unreliable iframe deep-link path
+/// for triggering the capture sidecar.
+#[tauri::command]
+async fn capture_account<R: Runtime>(
+    app: AppHandle<R>,
+    account_id: String,
+) -> Result<(), String> {
+    push_event(
+        &app,
+        &CaptureEvent::Progress {
+            message: format!("invoke received account={account_id}"),
+        },
+    );
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = run_capture(&handle, &account_id).await {
+            log::error!("capture failed: {err}");
+            push_event(
+                &handle,
+                &CaptureEvent::Error {
+                    message: err.to_string(),
+                },
+            );
+        }
+    });
+    Ok(())
+}
 
 fn handle_navigation<R: Runtime>(app: &AppHandle<R>, url: &Url) -> bool {
     if url.scheme() == DEEP_LINK_SCHEME {
