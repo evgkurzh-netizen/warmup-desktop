@@ -438,7 +438,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333", "pointer-events:auto"
     ].join(";");
     div.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.9</span>' +
+      '<span id="__ywk_diag_v__">v0.1.10</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_last__" style="flex:1;text-align:right">no /api/ calls yet</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
@@ -483,15 +483,33 @@ fn build_init_script() -> String {
       var urlStr = typeof input === "string"
         ? input
         : (input && input.url) || String(input);
-      var u = new URL(urlStr, ORIGIN);
+      // Resolve against the clean origin -- the document's baseURI still
+      // contains the Basic-auth userinfo from the initial navigation,
+      // which makes WebKit reject every fetch with
+      // "URL is not valid or contains user credentials".
+      var u = new URL(urlStr, ORIGIN + "/");
+      if (u.username || u.password) {{
+        u.username = "";
+        u.password = "";
+      }}
+      var cleanUrl = u.toString();
       if (u.origin === ORIGIN && u.pathname.indexOf("/api/") === 0) {{
         pathForDiag = u.pathname;
-        if (state.token) {{
-          var headers = new Headers(
-            init.headers || (input && input.headers ? input.headers : undefined)
-          );
-          if (!headers.has("x-api-key")) headers.set("x-api-key", state.token);
-          init = Object.assign({{}}, init, {{ headers: headers }});
+        var headers = new Headers(
+          init.headers || (input && input.headers ? input.headers : undefined)
+        );
+        if (state.token && !headers.has("x-api-key")) {{
+          headers.set("x-api-key", state.token);
+        }}
+        init = Object.assign({{}}, init, {{ headers: headers }});
+        input = cleanUrl;
+      }} else if (cleanUrl !== urlStr) {{
+        // Non-/api/* request whose URL also needs cleaning.
+        if (typeof input !== "string" && input && input.url) {{
+          // Request object -- rebuild it against the clean URL.
+          try {{ input = new Request(cleanUrl, input); }} catch (e) {{ input = cleanUrl; }}
+        }} else {{
+          input = cleanUrl;
         }}
       }}
     }} catch (e) {{}}
@@ -511,7 +529,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.9",
+    version: "0.1.10",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
