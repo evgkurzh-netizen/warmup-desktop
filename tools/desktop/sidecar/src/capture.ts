@@ -12,7 +12,10 @@
  *                                stdout line is a single JSON event the
  *                                Tauri shell forwards to the dashboard.
  */
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page } from "playwright";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 interface ProxyConfig {
   type: "http" | "socks5";
@@ -134,26 +137,41 @@ const GOOGLE_LOGIN_COOKIES = [
   "__Secure-1PSID",
 ];
 
+function profileDir(accountId: string): string {
+  const base =
+    process.platform === "darwin"
+      ? path.join(os.homedir(), "Library", "Application Support", "Warmup", "profiles")
+      : process.platform === "win32"
+      ? path.join(process.env["LOCALAPPDATA"] ?? path.join(os.homedir(), "AppData", "Local"), "Warmup", "profiles")
+      : path.join(os.homedir(), ".config", "warmup", "profiles");
+  const dir = path.join(base, accountId);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 async function launch(
   ctx: LoginContext,
-): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
-  const browser = await chromium.launch({
+): Promise<{ context: BrowserContext; page: Page }> {
+  const userDataDir = profileDir(ctx.accountId);
+  // Choose the UI locale that the browser CHROME is rendered in. This is
+  // separate from the navigator.language emulation done by stealthScript and
+  // by the `locale` option below. We force a Latin-script UI so the address
+  // bar / menus are never in CJK characters the user can't read, even if the
+  // fingerprint's primary language is e.g. zh-CN.
+  const fpLang = (ctx.fingerprint.languages[0] ?? "en-US").toLowerCase();
+  const uiLang = /^(en|ru|de|fr|es|pt|it|nl|pl|tr|uk)\b/.test(fpLang)
+    ? fpLang
+    : "en-US";
+  const launchOptions = {
     headless: false,
     args: [
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      `--lang=${ctx.fingerprint.languages[0] ?? "en-US"}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      `--lang=${uiLang}`,
     ],
-    proxy: ctx.proxy
-      ? {
-          server: `${ctx.proxy.type === "socks5" ? "socks5" : "http"}://${ctx.proxy.host}:${ctx.proxy.port}`,
-          username: ctx.proxy.username ?? undefined,
-          password: ctx.proxy.password ?? undefined,
-        }
-      : undefined,
-  });
-  const context = await browser.newContext({
     userAgent: ctx.fingerprint.userAgent,
     locale: ctx.fingerprint.languages[0] ?? "en-US",
     timezoneId: ctx.fingerprint.timezone,
@@ -165,10 +183,38 @@ async function launch(
     isMobile: ctx.fingerprint.device === "mobile",
     hasTouch: ctx.fingerprint.device === "mobile",
     extraHTTPHeaders: { "Accept-Language": ctx.fingerprint.languages.join(",") },
-  });
+    proxy: ctx.proxy
+      ? {
+          server: `${ctx.proxy.type === "socks5" ? "socks5" : "http"}://${ctx.proxy.host}:${ctx.proxy.port}`,
+          username: ctx.proxy.username ?? undefined,
+          password: ctx.proxy.password ?? undefined,
+        }
+      : undefined,
+  };
+
+  // Try the user's REAL Chrome first. Google's sign-in flow blocks
+  // Playwright's vanilla Chromium build with "This browser or app may not be
+  // secure" because it ships without Widevine and several Google-only API
+  // keys baked into Chrome. Falling back to the bundled Chromium only when
+  // Chrome isn't installed keeps the welcome flow working on machines
+  // without Chrome (e.g. fresh CI).
+  let context: BrowserContext;
+  try {
+    context = await chromium.launchPersistentContext(userDataDir, {
+      ...launchOptions,
+      channel: "chrome",
+    });
+    emit({ type: "progress", message: "using system Chrome channel" });
+  } catch (err) {
+    emit({
+      type: "progress",
+      message: `system Chrome unavailable (${err instanceof Error ? err.message : String(err)}); using bundled chromium`,
+    });
+    context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+  }
   await context.addInitScript(stealthScript(ctx.fingerprint));
-  const page = await context.newPage();
-  return { browser, context, page };
+  const page = context.pages()[0] ?? (await context.newPage());
+  return { context, page };
 }
 
 async function waitForLogin(
@@ -240,7 +286,36 @@ async function main(): Promise<void> {
     has_proxy: !!ctx.proxy,
   });
 
-  const { context, page, browser } = await launch(ctx);
+  const { context, page } = await launch(ctx);
+  // Make absolutely sure the browser process dies when this sidecar is
+  // killed (Tauri sends SIGTERM on app exit; before this handler the browser
+  // window stayed alive after the desktop app was closed, and clicking
+  // Capture again spawned yet another orphan browser).
+  let closing = false;
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (closing) return;
+    closing = true;
+    process.stderr.write(`[capture] received ${signal}, closing browser\n`);
+    try {
+      await context.close();
+    } catch {
+      /* ignore */
+    }
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGHUP", () => void shutdown("SIGHUP"));
+  // If the user closes the browser window directly, treat that as a cancel
+  // and exit cleanly instead of hanging in waitForLogin.
+  context.on("close", () => {
+    if (!closing) {
+      closing = true;
+      emit({ type: "error", message: "Browser window was closed before login completed." });
+      process.exit(1);
+    }
+  });
+
   try {
     await page.goto(args.startUrl, { waitUntil: "commit", timeout: 90_000 });
     emit({
@@ -259,13 +334,9 @@ async function main(): Promise<void> {
       cookie_count: cookieCount,
     });
   } finally {
+    closing = true;
     try {
       await context.close();
-    } catch {
-      /* ignore */
-    }
-    try {
-      await browser.close();
     } catch {
       /* ignore */
     }

@@ -34,7 +34,10 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, State, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
 };
-use tauri_plugin_shell::{process::CommandEvent, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -52,6 +55,15 @@ struct SetupState {
     chromium_ready: Mutex<bool>,
 }
 
+/// Tracks the live capture sidecar processes by account id so we can (a)
+/// reject duplicate spawns when the user double-clicks Capture and (b) kill
+/// the whole tree when the desktop app exits — otherwise orphaned Chromium
+/// windows keep popping up after the user closes Warmup.
+#[derive(Default)]
+struct CaptureRegistry {
+    children: std::sync::Mutex<HashMap<String, CommandChild>>,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
@@ -61,6 +73,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Arc::new(SetupState::default()))
+        .manage(Arc::new(CaptureRegistry::default()))
         .invoke_handler(tauri::generate_handler![
             welcome_init,
             save_owner_token,
@@ -94,8 +107,22 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Reap any sidecar processes that are still running so the
+                // user doesn't see orphaned Chromium windows after closing
+                // Warmup.
+                if let Some(reg) = app_handle.try_state::<Arc<CaptureRegistry>>() {
+                    let mut map = reg.children.lock().unwrap();
+                    for (account, child) in map.drain() {
+                        log::info!("killing capture sidecar for {account} on exit");
+                        let _ = child.kill();
+                    }
+                }
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +478,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.24</span>' +
+      '<span id="__ywk_diag_v__">v0.1.25</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -550,7 +577,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.24",
+    version: "0.1.25",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -777,8 +804,25 @@ async fn run_capture<R: Runtime>(
         // code 0. The macOS-15 / Apple-Silicon CodeRange OOM is addressed by
         // pinning the pkg target to Node 22 (see sidecar/build.mjs).
 
+    // Reject a second concurrent capture for the same account — that's how
+    // users ended up with 5+ Chromium windows opening on top of each other
+    // by clicking Capture repeatedly while the first browser was still up.
+    let registry = app.state::<Arc<CaptureRegistry>>().inner().clone();
+    {
+        let map = registry.children.lock().unwrap();
+        if map.contains_key(account_id) {
+            return Err(
+                "A capture browser is already open for this account. Finish or close it first.".into(),
+            );
+        }
+    }
+
     push_event(app, &CaptureEvent::Progress { message: "run_capture: spawning".into() });
-    let (mut rx, _child) = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let (mut rx, child) = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    {
+        let mut map = registry.children.lock().unwrap();
+        map.insert(account_id.to_string(), child);
+    }
     push_event(app, &CaptureEvent::Progress { message: "run_capture: spawned, awaiting output".into() });
     let mut saw_error_event = false;
     let mut last_stderr = String::new();
@@ -851,6 +895,13 @@ async fn run_capture<R: Runtime>(
             }
             _ => {}
         }
+    }
+    // Always drop the registry entry — the child has either exited cleanly
+    // or been killed; either way we want the next Capture click to be able
+    // to spawn a fresh browser.
+    {
+        let mut map = registry.children.lock().unwrap();
+        map.remove(account_id);
     }
     Ok(())
 }
