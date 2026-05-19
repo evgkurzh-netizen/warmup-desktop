@@ -439,7 +439,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333", "pointer-events:auto"
     ].join(";");
     div.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.12</span>' +
+      '<span id="__ywk_diag_v__">v0.1.13</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_last__" style="flex:1;text-align:right">no /api/ calls yet</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
@@ -530,7 +530,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.12",
+    version: "0.1.13",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;

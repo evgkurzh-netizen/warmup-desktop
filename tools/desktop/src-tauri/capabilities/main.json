@@ -8,6 +8,8 @@
   },
   "permissions": [
     "shell:allow-open",
-    "updater:default"
+    "updater:default",
+    "core:default",
+    "allow-capture-account"
   ]
 }

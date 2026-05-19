@@ -1,0 +1,6 @@
+"$schema" = "../gen/schemas/desktop-schema.json"
+
+[[permission]]
+identifier = "allow-capture-account"
+description = "Allow the remote dashboard window to invoke the capture_account command."
+commands.allow = ["capture_account"]
