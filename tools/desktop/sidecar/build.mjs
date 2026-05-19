@@ -80,17 +80,29 @@ execFileSync(
 );
 
 // pkg works by appending the bundled script + V8 snapshot to the end of
-// the base Node binary. On macOS that invalidates the ad-hoc signature
-// the pkg-fetched binary ships with -- macOS 15 / Apple Silicon then
-// kills the process with SIGTRAP at first exec because the Mach-O loader
-// refuses to load an unsigned/mis-signed binary. Re-sign ad-hoc to make
-// the loader happy. `-s -` = ad-hoc, `--force` overrides any existing
-// (broken) signature.
+// the base Node binary. On macOS that invalidates the signature pkg-fetch
+// ships with, and the macOS 15 / Apple Silicon loader SIGTRAPs the binary
+// before any user code runs. Re-sign ad-hoc to satisfy the loader, AND
+// attach the JIT entitlements V8 needs to allocate MAP_JIT pages -- the
+// upstream pkg-fetched Node ships with these entitlements; we have to
+// re-attach them since `codesign --force` strips them.
 if (targetKey === "darwin-arm64" || targetKey === "darwin-x64") {
-  console.log(`[sidecar] re-signing ${outPath} (ad-hoc) …`);
-  execFileSync("codesign", ["--force", "--sign", "-", outPath], {
-    stdio: "inherit",
-  });
+  const entitlements = resolve(repoSidecar, "entitlements.plist");
+  console.log(`[sidecar] re-signing ${outPath} with JIT entitlements …`);
+  execFileSync(
+    "codesign",
+    [
+      "--force",
+      "--sign",
+      "-",
+      "--entitlements",
+      entitlements,
+      "--options",
+      "runtime",
+      outPath,
+    ],
+    { stdio: "inherit" },
+  );
 }
 
 const ext = targetKey === "win-x64" ? ".exe" : "";
