@@ -17,6 +17,12 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+// proxy-chain spawns a local anonymizing HTTP proxy that injects upstream
+// auth headers for us. Required because Brave + Playwright's CDP-based
+// proxy-auth handler races against Brave's own proxy-auth dialog and the
+// HTTPS CONNECT to the upstream proxy silently hangs forever — see v0.1.32
+// debug logs (110s of pending goto with zero request events).
+import { anonymizeProxy, closeAnonymizedProxy } from "proxy-chain";
 
 interface ProxyConfig {
   type: "http" | "socks5";
@@ -287,6 +293,7 @@ async function probeProxyReachable(
 
 async function launch(
   ctx: LoginContext,
+  localProxyUrl: string | null,
 ): Promise<{ context: BrowserContext; page: Page }> {
   const userDataDir = profileDir(ctx.accountId);
   clearSessionRestoreState(userDataDir);
@@ -357,13 +364,12 @@ async function launch(
     isMobile: ctx.fingerprint.device === "mobile",
     hasTouch: ctx.fingerprint.device === "mobile",
     extraHTTPHeaders: { "Accept-Language": ctx.fingerprint.languages.join(",") },
-    proxy: ctx.proxy
-      ? {
-          server: `${ctx.proxy.type === "socks5" ? "socks5" : "http"}://${ctx.proxy.host}:${ctx.proxy.port}`,
-          username: ctx.proxy.username ?? undefined,
-          password: ctx.proxy.password ?? undefined,
-        }
-      : undefined,
+    // Always point at the local anonymizing relay (auth-less localhost
+    // proxy). proxy-chain handles upstream auth and the SOCKS->HTTP
+    // upgrade if needed. We never pass username/password to Brave directly
+    // because Brave's proxy-auth dialog races against Playwright's CDP
+    // Fetch.continueWithAuth handler and the HTTPS CONNECT hangs.
+    proxy: localProxyUrl ? { server: localProxyUrl } : undefined,
   };
 
   // Try the user's REAL browser first. Google's sign-in flow blocks
@@ -538,15 +544,36 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     emit({ type: "progress", message: "proxy reachable" });
-    const scheme = ctx.proxy.type === "socks5" ? "socks5" : "http";
-    const hasAuth = !!(ctx.proxy.username || ctx.proxy.password);
-    emit({
-      type: "progress",
-      message: `passing ${scheme}://${ctx.proxy.host}:${ctx.proxy.port} to Chromium (auth=${hasAuth ? "yes" : "no"})`,
-    });
   }
 
-  const { context, page } = await launch(ctx);
+  // Spin up a local anonymizing relay so Brave never has to handle proxy
+  // auth itself. anonymizeProxy returns a URL like http://127.0.0.1:34567
+  // and proxy-chain transparently forwards everything to the upstream
+  // proxy with the right Proxy-Authorization headers / SOCKS handshake.
+  let localProxyUrl: string | null = null;
+  if (ctx.proxy) {
+    const scheme = ctx.proxy.type === "socks5" ? "socks5" : "http";
+    const userPass =
+      ctx.proxy.username || ctx.proxy.password
+        ? `${encodeURIComponent(ctx.proxy.username ?? "")}:${encodeURIComponent(ctx.proxy.password ?? "")}@`
+        : "";
+    const upstream = `${scheme}://${userPass}${ctx.proxy.host}:${ctx.proxy.port}`;
+    try {
+      localProxyUrl = await anonymizeProxy(upstream);
+      emit({
+        type: "progress",
+        message: `local proxy relay at ${localProxyUrl} → upstream ${scheme}://${ctx.proxy.host}:${ctx.proxy.port}`,
+      });
+    } catch (err) {
+      emit({
+        type: "error",
+        message: `Failed to start local proxy relay: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      process.exit(1);
+    }
+  }
+
+  const { context, page } = await launch(ctx, localProxyUrl);
   // Make absolutely sure the browser process dies when this sidecar is
   // killed (Tauri sends SIGTERM on app exit; before this handler the browser
   // window stayed alive after the desktop app was closed, and clicking
@@ -560,6 +587,13 @@ async function main(): Promise<void> {
       await context.close();
     } catch {
       /* ignore */
+    }
+    if (localProxyUrl) {
+      try {
+        await closeAnonymizedProxy(localProxyUrl, true);
+      } catch {
+        /* ignore */
+      }
     }
     process.exit(0);
   };
@@ -616,6 +650,13 @@ async function main(): Promise<void> {
       await context.close();
     } catch {
       /* ignore */
+    }
+    if (localProxyUrl) {
+      try {
+        await closeAnonymizedProxy(localProxyUrl, true);
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
