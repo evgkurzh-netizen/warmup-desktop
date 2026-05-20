@@ -12,7 +12,13 @@
  *                                stdout line is a single JSON event the
  *                                Tauri shell forwards to the dashboard.
  */
-import { chromium, type BrowserContext, type Page } from "playwright";
+// patchright is a drop-in fork of Playwright with CDP-protocol and Chromium
+// patches that hide the well-known automation fingerprints (Runtime.enable
+// traces, Function.prototype.toString leaks, console api leaks). v0.1.33
+// logs proved vanilla Playwright + Brave gets rejected by Google's
+// /browserinfo fingerprint endpoint within seconds; JS-level stealth
+// patches in stealthScript cannot fix CDP-level signals.
+import { chromium, type BrowserContext, type Page } from "patchright";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -387,6 +393,20 @@ async function launch(
         executablePath: realBrowser.path,
       });
       emit({ type: "progress", message: `using ${realBrowser.name} at ${realBrowser.path}` });
+      // Even with patchright's CDP fingerprint patches, Brave is the WORST
+      // option for Google sign-in: its own anti-fingerprinting (Sec-GPC,
+      // missing Widevine, custom user agent client hints) makes it stand
+      // out to Google's /browserinfo endpoint regardless of what we do
+      // from automation side. v0.1.28-0.1.33 logs consistently showed
+      // /v3/signin/rejected for Brave. Warn explicitly so the user knows
+      // installing Chrome is the highest-leverage fix if this run fails.
+      if (realBrowser.name.startsWith("Brave")) {
+        emit({
+          type: "progress",
+          message:
+            "WARNING: Brave is consistently rejected by Google's sign-in flow even with stealth patches. If login fails, install Google Chrome from https://www.google.com/chrome/ — Chrome is the only browser Google reliably accepts.",
+        });
+      }
     } catch (err) {
       emit({
         type: "progress",
