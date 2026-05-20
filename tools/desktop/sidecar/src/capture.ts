@@ -388,23 +388,51 @@ async function launch(
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   }
   await context.addInitScript(stealthScript(ctx.fingerprint));
-  // Diagnose what's spawning extra tabs: every page (and popup) that the
-  // browser opens gets logged with its initial URL and subsequent
-  // navigations. This is what we needed to see in the previous round —
-  // without it we can only guess whether Brave is restoring tabs, Google
-  // is opening popups, or some Brave-internal feature is firing.
-  context.on("page", (p) => {
+  // Per-page diagnostics. The user reported the proxy works externally but
+  // page.goto still times out — we need to see what Chromium's network
+  // stack is actually doing. requestfailed surfaces proxy errors like
+  // ERR_TUNNEL_CONNECTION_FAILED, ERR_PROXY_CONNECTION_FAILED,
+  // ERR_PROXY_AUTH_REQUESTED, etc.; console catches Chromium-side warnings;
+  // page/framenavigated still help debug the tab cascade we fixed in v0.1.29.
+  const attachDiagnostics = (p: Page) => {
     emit({ type: "progress", message: `new page opened: ${p.url() || "(blank)"}` });
     p.on("framenavigated", (frame) => {
       if (frame === p.mainFrame()) {
         emit({ type: "progress", message: `page navigated: ${frame.url()}` });
       }
     });
+    p.on("requestfailed", (req) => {
+      const failure = req.failure();
+      emit({
+        type: "progress",
+        message: `request failed: ${req.method()} ${req.url()} — ${failure?.errorText ?? "unknown"}`,
+      });
+    });
+    p.on("response", (resp) => {
+      const status = resp.status();
+      if (status >= 400) {
+        emit({
+          type: "progress",
+          message: `response ${status} ${resp.url()}`,
+        });
+      }
+    });
+    p.on("console", (msg) => {
+      const t = msg.type();
+      if (t === "error" || t === "warning") {
+        emit({ type: "progress", message: `console.${t}: ${msg.text().slice(0, 300)}` });
+      }
+    });
     p.on("close", () => {
       emit({ type: "progress", message: `page closed: ${p.url() || "(blank)"}` });
     });
-  });
+  };
+  context.on("page", attachDiagnostics);
   const page = context.pages()[0] ?? (await context.newPage());
+  // The very first page already exists by the time we attach the listener,
+  // so we have to wire diagnostics on it manually — otherwise we'd miss
+  // every event on the only page we actually navigate.
+  attachDiagnostics(page);
   return { context, page };
 }
 
@@ -491,6 +519,12 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     emit({ type: "progress", message: "proxy reachable" });
+    const scheme = ctx.proxy.type === "socks5" ? "socks5" : "http";
+    const hasAuth = !!(ctx.proxy.username || ctx.proxy.password);
+    emit({
+      type: "progress",
+      message: `passing ${scheme}://${ctx.proxy.host}:${ctx.proxy.port} to Chromium (auth=${hasAuth ? "yes" : "no"})`,
+    });
   }
 
   const { context, page } = await launch(ctx);
