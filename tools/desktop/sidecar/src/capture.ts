@@ -308,7 +308,15 @@ async function launch(
     // few Chrome features (e.g. password manager) Google's bot detection
     // looks for. With this removed Brave/Chrome looks like a normal
     // user-launched session.
-    ignoreDefaultArgs: ["--enable-automation"],
+    // Even with --no-sandbox / --disable-setuid-sandbox removed from our own
+    // args list in v0.1.30, Brave still surfaced the "you are using an
+    // unsupported command-line flag --no-sandbox" red banner — Playwright
+    // injects them itself via chromium.defaultArgs(). Override that here.
+    ignoreDefaultArgs: [
+      "--enable-automation",
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+    ],
     args: [
       // NOTE: --no-sandbox / --disable-setuid-sandbox are Linux-only
       // sandboxing controls. Passing them on macOS/Windows is harmless to
@@ -399,6 +407,17 @@ async function launch(
     p.on("framenavigated", (frame) => {
       if (frame === p.mainFrame()) {
         emit({ type: "progress", message: `page navigated: ${frame.url()}` });
+      }
+    });
+    p.on("request", (req) => {
+      // Only log document/script-level requests, not every image/font, to
+      // avoid spam. resourceType "document" is the navigation itself.
+      const t = req.resourceType();
+      if (t === "document" || t === "xhr" || t === "fetch") {
+        emit({
+          type: "progress",
+          message: `request started: ${req.method()} ${t} ${req.url()}`,
+        });
       }
     });
     p.on("requestfailed", (req) => {
@@ -558,11 +577,24 @@ async function main(): Promise<void> {
   });
 
   try {
-    // waitUntil "domcontentloaded" gives Chromium time to actually parse the
-    // sign-in page; "commit" only waits for response headers and surfaced as
-    // an unhelpful 90s timeout when the proxy was slow. Bumped to 120s
-    // because residential proxies routinely take 20-40s on the first hop.
-    await page.goto(args.startUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    emit({ type: "progress", message: `goto -> ${args.startUrl}` });
+    // Heartbeat while navigating so we can see in the log whether goto is
+    // hung waiting on the network or got past navigation.
+    const heartbeat = setInterval(() => {
+      emit({
+        type: "progress",
+        message: `goto still pending… current url=${page.url()}`,
+      });
+    }, 10_000);
+    try {
+      // waitUntil "domcontentloaded" gives Chromium time to actually parse the
+      // sign-in page; "commit" only waits for response headers and surfaced as
+      // an unhelpful 90s timeout when the proxy was slow. Bumped to 120s
+      // because residential proxies routinely take 20-40s on the first hop.
+      await page.goto(args.startUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    } finally {
+      clearInterval(heartbeat);
+    }
     emit({
       type: "progress",
       message: `Waiting up to ${args.timeoutMin} min for Google login cookies.`,
