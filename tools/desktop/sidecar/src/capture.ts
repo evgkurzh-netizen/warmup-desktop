@@ -218,14 +218,26 @@ function profileDir(accountId: string): string {
  * preserving the Cookies / Local Storage DB we actually care about.
  */
 function clearSessionRestoreState(userDataDir: string): void {
-  const defaults = [
+  // We wipe SESSION + UI PREFERENCE state but keep the Cookies / Local
+  // Storage / IndexedDB DBs that actually represent the user's Google
+  // login. "Preferences" / "Local State" carry the UI locale, the
+  // restore-on-startup setting, the list of pinned tabs etc. — leaving
+  // them in place was causing two visible bugs: (a) Brave kept rendering
+  // its UI in Korean because the first run wrote intl.accept_languages
+  // from the fingerprint, and (b) Brave kept reopening the prior auth
+  // tab on every launch despite us wiping Current Session, because the
+  // "open tabs from last session" flag in Preferences was sticky.
+  const targets = [
     path.join(userDataDir, "Default", "Current Session"),
     path.join(userDataDir, "Default", "Current Tabs"),
     path.join(userDataDir, "Default", "Last Session"),
     path.join(userDataDir, "Default", "Last Tabs"),
     path.join(userDataDir, "Default", "Sessions"),
+    path.join(userDataDir, "Default", "Preferences"),
+    path.join(userDataDir, "Default", "Secure Preferences"),
+    path.join(userDataDir, "Local State"),
   ];
-  for (const target of defaults) {
+  for (const target of targets) {
     try {
       fs.rmSync(target, { recursive: true, force: true });
     } catch {
@@ -263,11 +275,27 @@ async function launch(
       "--disable-setuid-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
-      "--disable-features=Translate,InfiniteSessionRestore",
-      `--lang=${uiLang}`,
+      "--no-service-autorun",
+      // Disable Brave's own onboarding tabs (rewards, wallet, web-discovery)
+      // and Chromium's translate prompt, plus session-restore prompts that
+      // were reopening prior auth tabs every launch.
+      "--disable-features=Translate,InfiniteSessionRestore,BraveRewards,BraveAds,BraveWayback,BraveSearchOmnibox,BraveWelcomeUI,WebOTP",
+      "--disable-brave-update",
+      "--disable-component-update",
+      "--restore-last-session=false",
+      // Always force an English browser UI regardless of the fingerprint
+      // language. navigator.language is still emulated separately in
+      // stealthScript so the SITE sees the fingerprint language.
+      "--lang=en-US",
     ],
     userAgent: ctx.fingerprint.userAgent,
-    locale: ctx.fingerprint.languages[0] ?? "en-US",
+    // NOTE: we intentionally do NOT pass `locale` here. Playwright writes
+    // the locale option into Chromium's --lang arg AND into the profile's
+    // Preferences file (intl.app_locale), which is what kept rendering
+    // Brave's UI in Korean/Chinese for users whose fingerprint had a CJK
+    // primary language. Browser UI language is now hard-coded to en-US via
+    // the --lang arg above; navigator.language and Accept-Language are
+    // emulated separately (stealthScript + extraHTTPHeaders below).
     timezoneId: ctx.fingerprint.timezone,
     viewport: {
       width: ctx.fingerprint.screenWidth,
@@ -316,6 +344,22 @@ async function launch(
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   }
   await context.addInitScript(stealthScript(ctx.fingerprint));
+  // Diagnose what's spawning extra tabs: every page (and popup) that the
+  // browser opens gets logged with its initial URL and subsequent
+  // navigations. This is what we needed to see in the previous round —
+  // without it we can only guess whether Brave is restoring tabs, Google
+  // is opening popups, or some Brave-internal feature is firing.
+  context.on("page", (p) => {
+    emit({ type: "progress", message: `new page opened: ${p.url() || "(blank)"}` });
+    p.on("framenavigated", (frame) => {
+      if (frame === p.mainFrame()) {
+        emit({ type: "progress", message: `page navigated: ${frame.url()}` });
+      }
+    });
+    p.on("close", () => {
+      emit({ type: "progress", message: `page closed: ${p.url() || "(blank)"}` });
+    });
+  });
   const page = context.pages()[0] ?? (await context.newPage());
   return { context, page };
 }
