@@ -14,6 +14,7 @@
  */
 import { chromium, type BrowserContext, type Page } from "playwright";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -246,6 +247,44 @@ function clearSessionRestoreState(userDataDir: string): void {
   }
 }
 
+/**
+ * Best-effort reachability check for the account's proxy. Issued before we
+ * spawn the browser so that an obviously dead proxy fails in <5s with a
+ * clear message instead of leaving the user staring at a blank Brave window
+ * while Playwright's page.goto burns the full 120s navigation timeout. We
+ * deliberately only test that the proxy's TCP port is accepting
+ * connections — we cannot easily verify that the proxy can actually reach
+ * google.com (especially for SOCKS5 + auth) without pulling in another
+ * dependency, and a TCP probe catches the overwhelmingly common case of a
+ * dead/unreachable proxy host.
+ */
+async function probeProxyReachable(
+  proxy: ProxyConfig,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return new Promise((resolve) => {
+    const sock = net.createConnection({ host: proxy.host, port: proxy.port });
+    const timer = setTimeout(() => {
+      sock.destroy();
+      resolve({
+        ok: false,
+        reason: `TCP connect to ${proxy.host}:${proxy.port} timed out after 5s`,
+      });
+    }, 5000);
+    sock.once("connect", () => {
+      clearTimeout(timer);
+      sock.destroy();
+      resolve({ ok: true });
+    });
+    sock.once("error", (err) => {
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        reason: `TCP connect to ${proxy.host}:${proxy.port} failed: ${err.message}`,
+      });
+    });
+  });
+}
+
 async function launch(
   ctx: LoginContext,
 ): Promise<{ context: BrowserContext; page: Page }> {
@@ -271,15 +310,20 @@ async function launch(
     // user-launched session.
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
+      // NOTE: --no-sandbox / --disable-setuid-sandbox are Linux-only
+      // sandboxing controls. Passing them on macOS/Windows is harmless to
+      // Chromium itself, but Brave surfaces a red "you are using an
+      // unsupported command-line flag, stability and security will suffer"
+      // banner over the page which spooked the user. The desktop app only
+      // targets macOS and Windows, so we omit them entirely.
       "--no-first-run",
       "--no-default-browser-check",
       "--no-service-autorun",
-      // Disable Brave's own onboarding tabs (rewards, wallet, web-discovery)
-      // and Chromium's translate prompt, plus session-restore prompts that
-      // were reopening prior auth tabs every launch.
-      "--disable-features=Translate,InfiniteSessionRestore,BraveRewards,BraveAds,BraveWayback,BraveSearchOmnibox,BraveWelcomeUI,WebOTP",
+      // Disable Brave's own onboarding tabs (rewards, wallet, web-discovery),
+      // session-restore prompts, AND Brave Shields. Shields blocks a long
+      // list of Google trackers by default which can stall accounts.google.com
+      // sub-resource loads and leave the sign-in page spinning.
+      "--disable-features=Translate,InfiniteSessionRestore,BraveRewards,BraveAds,BraveWayback,BraveSearchOmnibox,BraveWelcomeUI,WebOTP,BraveShields,BraveAdblockExperimentalListDefault",
       "--disable-brave-update",
       "--disable-component-update",
       "--restore-last-session=false",
@@ -433,6 +477,22 @@ async function main(): Promise<void> {
     has_proxy: !!ctx.proxy,
   });
 
+  if (ctx.proxy) {
+    emit({
+      type: "progress",
+      message: `probing proxy ${ctx.proxy.host}:${ctx.proxy.port} (${ctx.proxy.type})`,
+    });
+    const probe = await probeProxyReachable(ctx.proxy);
+    if (!probe.ok) {
+      emit({
+        type: "error",
+        message: `Proxy unreachable: ${probe.reason}. Check the proxy in the dashboard — the account's proxy server is down or unreachable from this machine.`,
+      });
+      process.exit(1);
+    }
+    emit({ type: "progress", message: "proxy reachable" });
+  }
+
   const { context, page } = await launch(ctx);
   // Make absolutely sure the browser process dies when this sidecar is
   // killed (Tauri sends SIGTERM on app exit; before this handler the browser
@@ -464,7 +524,11 @@ async function main(): Promise<void> {
   });
 
   try {
-    await page.goto(args.startUrl, { waitUntil: "commit", timeout: 90_000 });
+    // waitUntil "domcontentloaded" gives Chromium time to actually parse the
+    // sign-in page; "commit" only waits for response headers and surfaced as
+    // an unhelpful 90s timeout when the proxy was slow. Bumped to 120s
+    // because residential proxies routinely take 20-40s on the first hop.
+    await page.goto(args.startUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
     emit({
       type: "progress",
       message: `Waiting up to ${args.timeoutMin} min for Google login cookies.`,
