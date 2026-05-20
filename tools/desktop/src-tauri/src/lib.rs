@@ -489,7 +489,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.34</span>' +
+      '<span id="__ywk_diag_v__">v0.1.35</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -588,7 +588,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.34",
+    version: "0.1.35",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;

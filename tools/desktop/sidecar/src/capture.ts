@@ -510,7 +510,7 @@ async function installChromium(): Promise<void> {
   // install chromium` triggers.
   process.stdout.write("Resolving Playwright registry…\n");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const reg: any = await import("playwright-core/lib/server/registry");
+  const reg: any = await import("patchright-core/lib/server/registry");
   const registry = reg.registry as {
     executables(): Array<{ name: string }>;
     install(
