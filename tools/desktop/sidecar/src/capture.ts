@@ -308,73 +308,42 @@ async function launch(
   // by the `locale` option below. We force a Latin-script UI so the address
   // bar / menus are never in CJK characters the user can't read, even if the
   // fingerprint's primary language is e.g. zh-CN.
-  const fpLang = (ctx.fingerprint.languages[0] ?? "en-US").toLowerCase();
-  const uiLang = /^(en|ru|de|fr|es|pt|it|nl|pl|tr|uk)\b/.test(fpLang)
-    ? fpLang
-    : "en-US";
+  // v0.1.37 deliberately strips ALL Playwright-side emulation and
+  // JS-injected stealth. v0.1.36 logs proved Google's /browserinfo endpoint
+  // rejected both Brave and Chrome ~30s after page load, even though manual
+  // Chrome via the EXACT SAME proxy + account succeeded. The user's manual
+  // session differs from ours only in our automation surface:
+  //   - addInitScript(stealthScript) triggered a CSP violation on Google's
+  //     pages (the inline script doesn't match Google's nonce). Google's
+  //     CSP uses report-sample, so every violation is sent back to Google
+  //     and folded into the bot-detection signal.
+  //   - userAgent override / extraHTTPHeaders / viewport / timezoneId
+  //     all create subtle inconsistencies between the JS surface and the
+  //     CDP-reported browser state that patchright cannot fully reconcile.
+  //   - ignoreDefaultArgs lists fight with patchright's own arg patches.
+  // Strategy: pass the bare minimum (proxy + a few Brave-onboarding flags)
+  // and let patchright + the real browser executable handle stealth at the
+  // CDP layer. The fingerprint param is still emitted into ctx so post-
+  // capture code can persist it server-side, but we no longer try to spoof
+  // anything at runtime.
   const launchOptions = {
     headless: false,
-    // Drop Playwright's default `--enable-automation` flag. It is THE single
-    // strongest tell for Google's "this browser or app may not be secure"
-    // gate: it sets `navigator.webdriver = true`, surfaces the "Chrome is
-    // being controlled by automated test software" infobar, and disables a
-    // few Chrome features (e.g. password manager) Google's bot detection
-    // looks for. With this removed Brave/Chrome looks like a normal
-    // user-launched session.
-    // Even with --no-sandbox / --disable-setuid-sandbox removed from our own
-    // args list in v0.1.30, Brave still surfaced the "you are using an
-    // unsupported command-line flag --no-sandbox" red banner — Playwright
-    // injects them itself via chromium.defaultArgs(). Override that here.
-    ignoreDefaultArgs: [
-      "--enable-automation",
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-    ],
     args: [
-      // NOTE: --no-sandbox / --disable-setuid-sandbox are Linux-only
-      // sandboxing controls. Passing them on macOS/Windows is harmless to
-      // Chromium itself, but Brave surfaces a red "you are using an
-      // unsupported command-line flag, stability and security will suffer"
-      // banner over the page which spooked the user. The desktop app only
-      // targets macOS and Windows, so we omit them entirely.
       "--no-first-run",
       "--no-default-browser-check",
       "--no-service-autorun",
-      // Disable Brave's own onboarding tabs (rewards, wallet, web-discovery),
-      // session-restore prompts, AND Brave Shields. Shields blocks a long
-      // list of Google trackers by default which can stall accounts.google.com
-      // sub-resource loads and leave the sign-in page spinning.
+      // Brave-only: suppress its own onboarding tabs (rewards/wallet),
+      // session-restore, and Shields (which blocks a long list of Google
+      // trackers and stalls accounts.google.com sub-resource loads). These
+      // flags are no-ops on Chrome/Edge.
       "--disable-features=Translate,InfiniteSessionRestore,BraveRewards,BraveAds,BraveWayback,BraveSearchOmnibox,BraveWelcomeUI,WebOTP,BraveShields,BraveAdblockExperimentalListDefault",
       "--disable-brave-update",
       "--disable-component-update",
       "--restore-last-session=false",
-      // Always force an English browser UI regardless of the fingerprint
-      // language. navigator.language is still emulated separately in
-      // stealthScript so the SITE sees the fingerprint language.
-      "--lang=en-US",
     ],
-    userAgent: ctx.fingerprint.userAgent,
-    // NOTE: we intentionally do NOT pass `locale` here. Playwright writes
-    // the locale option into Chromium's --lang arg AND into the profile's
-    // Preferences file (intl.app_locale), which is what kept rendering
-    // Brave's UI in Korean/Chinese for users whose fingerprint had a CJK
-    // primary language. Browser UI language is now hard-coded to en-US via
-    // the --lang arg above; navigator.language and Accept-Language are
-    // emulated separately (stealthScript + extraHTTPHeaders below).
-    timezoneId: ctx.fingerprint.timezone,
-    viewport: {
-      width: ctx.fingerprint.screenWidth,
-      height: ctx.fingerprint.screenHeight,
-    },
-    deviceScaleFactor: ctx.fingerprint.deviceScaleFactor,
-    isMobile: ctx.fingerprint.device === "mobile",
-    hasTouch: ctx.fingerprint.device === "mobile",
-    extraHTTPHeaders: { "Accept-Language": ctx.fingerprint.languages.join(",") },
-    // Always point at the local anonymizing relay (auth-less localhost
-    // proxy). proxy-chain handles upstream auth and the SOCKS->HTTP
-    // upgrade if needed. We never pass username/password to Brave directly
-    // because Brave's proxy-auth dialog races against Playwright's CDP
-    // Fetch.continueWithAuth handler and the HTTPS CONNECT hangs.
+    // Local anonymizing relay (auth-less localhost). proxy-chain handles
+    // upstream Proxy-Authorization for us so Brave/Chrome never have to
+    // negotiate credentials — see v0.1.33 commit message.
     proxy: localProxyUrl ? { server: localProxyUrl } : undefined,
   };
 
@@ -421,7 +390,14 @@ async function launch(
     });
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   }
-  await context.addInitScript(stealthScript(ctx.fingerprint));
+  // v0.1.37: do NOT inject stealthScript via addInitScript. The injected
+  // inline IIFE triggers a CSP violation on Google's pages (their CSP uses
+  // report-sample, so violations get phoned home and folded into bot
+  // detection). patchright handles navigator.webdriver, the chrome.runtime
+  // shim, and friends at the CDP layer where Google can't see the patch.
+  // The fingerprint param is preserved on ctx for downstream server-side
+  // persistence but no longer applied to the running page.
+  void stealthScript;
   // Per-page diagnostics. The user reported the proxy works externally but
   // page.goto still times out — we need to see what Chromium's network
   // stack is actually doing. requestfailed surfaces proxy errors like
