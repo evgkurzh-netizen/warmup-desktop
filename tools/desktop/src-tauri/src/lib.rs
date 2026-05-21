@@ -338,10 +338,13 @@ async fn install_chromium<R: Runtime>(
     }
 
     let shell = app.shell();
+    let (node_path, capture_js) = resolve_capture_paths(&app)?;
     let cmd = shell
-        .sidecar("capture")
-        .map_err(|e| format!("sidecar not bundled: {e}"))?
-        .args(["--install-chromium"]);
+        .command(node_path.to_string_lossy().to_string())
+        .args([
+            capture_js.to_string_lossy().to_string(),
+            "--install-chromium".to_string(),
+        ]);
 
     let (mut rx, _child) = cmd.spawn().map_err(|e| e.to_string())?;
     let mut last_line = String::new();
@@ -489,7 +492,7 @@ fn build_init_script() -> String {
       "border-top:1px solid #333"
     ].join(";");
     bar.innerHTML =
-      '<span id="__ywk_diag_v__">v0.1.35</span>' +
+      '<span id="__ywk_diag_v__">v0.1.36</span>' +
       '<span id="__ywk_diag_token__">Token: ?</span>' +
       '<span id="__ywk_diag_x__" style="cursor:pointer;color:#fff" title="Hide">x</span>';
     wrap.appendChild(log);
@@ -588,7 +591,7 @@ fn build_init_script() -> String {
 
   var listeners = [];
   window.__YWK_DESKTOP__ = Object.freeze({{
-    version: "0.1.35",
+    version: "0.1.36",
     hasToken: true,
     capture: function(accountId) {{
       if (!accountId) return;
@@ -785,6 +788,36 @@ enum CaptureEvent {
     },
 }
 
+/// Resolve the bundled Node.js binary and capture.cjs entrypoint paths
+/// inside Tauri's resource directory. The build.mjs script stages both
+/// under `resources/sidecar/` so the structure at runtime is:
+///   <resource_dir>/resources/sidecar/node[.exe]
+///   <resource_dir>/resources/sidecar/capture.cjs
+///   <resource_dir>/resources/sidecar/node_modules/...
+fn resolve_capture_paths<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let base = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("resource_dir unavailable: {e}"))?;
+    let sidecar = base.join("resources").join("sidecar");
+    let node_name = if cfg!(target_os = "windows") {
+        "node.exe"
+    } else {
+        "node"
+    };
+    let node_path = sidecar.join(node_name);
+    let capture_js = sidecar.join("capture.cjs");
+    if !node_path.exists() {
+        return Err(format!("bundled node missing at {}", node_path.display()));
+    }
+    if !capture_js.exists() {
+        return Err(format!("capture.cjs missing at {}", capture_js.display()));
+    }
+    Ok((node_path, capture_js))
+}
+
 async fn run_capture<R: Runtime>(
     app: &AppHandle<R>,
     account_id: &str,
@@ -796,24 +829,25 @@ async fn run_capture<R: Runtime>(
 
     let shell = app.shell();
     push_event(app, &CaptureEvent::Progress { message: "run_capture: resolving sidecar".into() });
+    let (node_path, capture_js) = resolve_capture_paths(app)?;
     let cmd = shell
-        .sidecar("capture")
-        .map_err(|e| format!("sidecar not bundled: {e}"))?
+        .command(node_path.to_string_lossy().to_string())
         .args([
-            "--base-url",
-            APP_BASE_URL.trim_end_matches('/'),
-            "--token",
-            &token,
-            "--account",
-            account_id,
-            "--emit-json",
+            capture_js.to_string_lossy().to_string(),
+            "--base-url".to_string(),
+            APP_BASE_URL.trim_end_matches('/').to_string(),
+            "--token".to_string(),
+            token.clone(),
+            "--account".to_string(),
+            account_id.to_string(),
+            "--emit-json".to_string(),
         ]);
         // NOTE: Do NOT set NODE_OPTIONS=--jitless here. It disables V8 JIT
         // *and* WebAssembly, which Node's bundled undici requires to compile
         // llhttp -- without WASM, the first fetch() call throws before any
         // output reaches us, and the process appears to exit silently with
         // code 0. The macOS-15 / Apple-Silicon CodeRange OOM is addressed by
-        // pinning the pkg target to Node 22 (see sidecar/build.mjs).
+        // shipping Node 22 as a bundled resource (see sidecar/build.mjs).
 
     // Reject a second concurrent capture for the same account — that's how
     // users ended up with 5+ Chromium windows opening on top of each other

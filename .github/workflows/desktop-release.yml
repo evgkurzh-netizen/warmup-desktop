@@ -65,6 +65,14 @@ jobs:
         run: pnpm --filter @workspace/desktop install --frozen-lockfile=false
 
       - name: Install sidecar deps
+        # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: patchright-core's postinstall would
+        # otherwise pull ~300MB of Chromium per platform into the runner cache.
+        # We use the host's real Chrome/Brave via executablePath; the fallback
+        # bundled chromium is installed lazily at first run via the runtime
+        # registry.install() path (see ensureChromiumInstalled in capture.ts).
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           cd tools/desktop/sidecar
           npm install --no-audit --no-fund
@@ -74,7 +82,11 @@ jobs:
           cd tools/desktop/sidecar
           npm run build:js
 
-      - name: Build sidecar binary (${{ matrix.sidecarTarget }})
+      - name: Stage sidecar resources (${{ matrix.sidecarTarget }})
+        # Downloads pinned Node 22 for the target platform and copies
+        # node + capture.cjs + pruned production node_modules into
+        # tools/desktop/src-tauri/resources/sidecar/. tauri.conf.json's
+        # `resources` field bundles everything under that directory.
         run: |
           cd tools/desktop/sidecar
           node ./build.mjs --target=${{ matrix.sidecarTarget }}

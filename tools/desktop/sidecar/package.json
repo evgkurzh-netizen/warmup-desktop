@@ -5,9 +5,9 @@
   "type": "module",
   "bin": "./dist/capture.cjs",
   "scripts": {
-    "build:js": "esbuild src/capture.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/capture.cjs --external:patchright --external:patchright-core --external:fsevents --external:bufferutil --external:utf-8-validate --external:chromium-bidi --external:electron",
-    "build:bin": "node ./build.mjs",
-    "build": "pnpm run build:js && pnpm run build:bin"
+    "build:js": "esbuild src/capture.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/capture.cjs --external:patchright --external:patchright-core --external:proxy-chain --external:fsevents --external:bufferutil --external:utf-8-validate --external:chromium-bidi --external:electron",
+    "build:stage": "node ./build.mjs",
+    "build": "pnpm run build:js && pnpm run build:stage"
   },
   "dependencies": {
     "patchright": "1.60.0",
@@ -15,20 +15,6 @@
     "proxy-chain": "2.5.6"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "6.0.0",
     "esbuild": "0.27.3"
-  },
-  "pkg": {
-    "scripts": [
-      "node_modules/patchright/lib/**/*.js",
-      "node_modules/patchright-core/lib/**/*.js"
-    ],
-    "assets": [
-      "node_modules/patchright/browsers.json",
-      "node_modules/patchright-core/browsers.json",
-      "node_modules/patchright-core/lib/vite/**/*",
-      "node_modules/patchright-core/bin/**/*",
-      "node_modules/patchright-core/third_party/**/*"
-    ]
   }
 }

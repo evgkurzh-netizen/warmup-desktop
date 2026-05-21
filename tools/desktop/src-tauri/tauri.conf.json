@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Warmup",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "identifier": "ru.fvds.warmacc.desktop",
   "build": {
     "frontendDist": "../shell"
@@ -27,7 +27,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/capture"],
+    "resources": ["resources/sidecar/**/*"],
     "publisher": "Warmup",
     "category": "Productivity",
     "shortDescription": "Warmup operator console",
